@@ -11,6 +11,7 @@ Qleon/
 │   │   │   │   │   │   └── LoginFragment.kt                # Halaman login
 │   │   │   │   │   ├── home/
 │   │   │   │   │   │   ├── HomeFragment.kt                 # Halaman utama (daftar chat)
+│   │   │   │   │   │   ├── HomeViewPagerAdapter.kt                 # Halaman utama (daftar chat)
 │   │   │   │   │   ├── chat/
 │   │   │   │   │   │   ├── ChatFragment.kt                 # Halaman chat
 │   │   │   │   │   │   ├── ChatViewModel.kt                # ViewModel untuk Chat
@@ -22,6 +23,7 @@ Qleon/
 │   │   │   │   │   │   ├── HomeChatViewModel.kt            # ViewModel untuk HomeChat
 │   │   │   │   ├── adapter/
 │   │   │   │   │   ├── ChatAdapter.kt                      # Adapter untuk daftar chat atau pesan
+│   │   │   │   │   ├── HomeAdapter.kt                      # Adapter untuk daftar Home atau pesan
 │   │   │   │   ├── model/
 │   │   │   │   │   ├── Chat.kt                             # Model untuk chat
 │   │   │   │   │   ├── Message.kt                          # Model untuk pesan
