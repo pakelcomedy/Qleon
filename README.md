@@ -35,6 +35,7 @@ Qleon/
 │   │   │       │   ├── fragment_splash.xml          # Layout SplashFragment
 │   │   │       │   ├── fragment_login.xml           # Layout LoginFragment
 │   │   │       │   ├── fragment_home.xml            # Layout HomeFragment
+│   │   │       │   ├── fragment_home_chat.xml       # Layout HomeChatFragment
 │   │   │       │   ├── fragment_new_chat.xml        # Layout NewChatFragment
 │   │   │       │   └── fragment_chat.xml            # Layout ChatFragment
 │   │   │       ├── drawable/                        # Gambar atau ikon aplikasi
