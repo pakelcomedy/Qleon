@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    app:startDestination="@id/splashFragment">
+
+    <!-- Splash Fragment -->
+    <fragment
+        android:id="@+id/splashFragment"
+        android:name="com.pakelcomedy.qleon.ui.splash.SplashFragment"
+        android:label="Splash Fragment"
+        tools:layout="@layout/fragment_splash">
+        <action
+            android:id="@+id/action_splashFragment_to_homeFragment"
+            app:destination="@id/homeFragment" />
+    </fragment>
+
+    <!-- Home Fragment -->
+    <fragment
+        android:id="@+id/homeFragment"
+        android:name="com.pakelcomedy.qleon.ui.home.HomeFragment"
+        android:label="Home"
+        tools:layout="@layout/fragment_home">
+        <action
+            android:id="@+id/action_homeFragment_to_homeChatFragment"
+            app:destination="@id/homeChatFragment" />
+        <action
+            android:id="@+id/action_homeFragment_to_newChatFragment"
+            app:destination="@id/newChatFragment" />
+    </fragment>
+
+    <!-- Home Chat Fragment -->
+    <fragment
+        android:id="@+id/homeChatFragment"
+        android:name="com.pakelcomedy.qleon.ui.homechat.HomeChatFragment"
+        android:label="Home Chat"
+        tools:layout="@layout/fragment_home_chat">
+        <action
+            android:id="@+id/action_homeChatFragment_to_chatFragment"
+            app:destination="@id/chatFragment">
+            <argument
+                android:name="contactName"
+                app:argType="string" />
+        </action>
+    </fragment>
+
+    <!-- Chat Fragment -->
+    <fragment
+        android:id="@+id/chatFragment"
+        android:name="com.pakelcomedy.qleon.ui.chat.ChatFragment"
+        android:label="Chat">
+        <argument
+            android:name="username"
+            app:argType="string" />
+    </fragment>
+
+    <!-- New Chat Fragment -->
+    <fragment
+        android:id="@+id/newChatFragment"
+        android:name="com.pakelcomedy.qleon.ui.newchat.NewChatFragment"
+        android:label="New Chat">
+        <action
+            android:id="@+id/action_newChatFragment_to_chatFragment"
+            app:destination="@id/chatFragment">
+            <argument
+                android:name="username"
+                app:argType="string" />
+        </action>
+    </fragment>
+</navigation>
