@@ -11,7 +11,6 @@ Qleon/
 │   │   │   │   │   │   └── LoginFragment.kt                # Halaman login
 │   │   │   │   │   ├── home/
 │   │   │   │   │   │   ├── HomeFragment.kt                 # Halaman utama (daftar chat)
-│   │   │   │   │   │   ├── HomeViewModel.kt                # ViewModel untuk Home
 │   │   │   │   │   ├── chat/
 │   │   │   │   │   │   ├── ChatFragment.kt                 # Halaman chat
 │   │   │   │   │   │   ├── ChatViewModel.kt                # ViewModel untuk Chat
