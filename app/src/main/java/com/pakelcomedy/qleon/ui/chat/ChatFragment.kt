@@ -52,9 +52,11 @@ class ChatFragment : Fragment(R.layout.fragment_chat) {
 
         // Observe messages from the ViewModel
         viewModel.messages.observe(viewLifecycleOwner, Observer { messages ->
-            messages?.let {
-                messageAdapter.submitList(it)
-                binding.messageList.scrollToPosition(it.size - 1) // Auto-scroll to the latest message
+            // Safely handle null or empty list
+            val safeMessages = messages ?: emptyList()
+            messageAdapter.submitList(safeMessages)
+            if (safeMessages.isNotEmpty()) {
+                binding.messageList.scrollToPosition(safeMessages.size - 1) // Auto-scroll to the latest message
             }
         })
 
@@ -69,12 +71,10 @@ class ChatFragment : Fragment(R.layout.fragment_chat) {
                 Toast.makeText(requireContext(), "Message cannot be empty", Toast.LENGTH_SHORT).show()
             }
         }
-
-        // (Optional) Simulate a reply after a delay for testing purposes
         simulateReply()
     }
 
-    // Simulate a reply from the contact
+    // Simulate a reply from the contact (for testing purposes)
     private fun simulateReply() {
         // This would be handled through ViewModel in a real case (e.g., Firebase)
         viewModel.receiveMessage("This is an auto-reply!") // Simulate reply

@@ -21,12 +21,30 @@
         android:name="com.pakelcomedy.qleon.ui.home.HomeFragment"
         android:label="Home"
         tools:layout="@layout/fragment_home">
+
+        <!-- Action to navigate to HomeChatFragment -->
         <action
             android:id="@+id/action_homeFragment_to_homeChatFragment"
             app:destination="@id/homeChatFragment" />
+
+        <!-- Action to navigate to NewChatFragment -->
         <action
             android:id="@+id/action_homeFragment_to_newChatFragment"
             app:destination="@id/newChatFragment" />
+
+        <!-- Action to navigate to ChatFragment with arguments -->
+        <action
+            android:id="@+id/action_homeFragment_to_chatFragment"
+            app:destination="@id/chatFragment">
+            <argument
+                android:name="username"
+                app:argType="string"
+                app:nullable="false" />
+            <argument
+                android:name="contactName"
+                app:argType="string"
+                app:nullable="true" />
+        </action>
     </fragment>
 
     <!-- Home Chat Fragment -->
@@ -35,23 +53,22 @@
         android:name="com.pakelcomedy.qleon.ui.homechat.HomeChatFragment"
         android:label="Home Chat"
         tools:layout="@layout/fragment_home_chat">
-        <action
-            android:id="@+id/action_homeChatFragment_to_chatFragment"
-            app:destination="@id/chatFragment">
-            <argument
-                android:name="contactName"
-                app:argType="string" />
-        </action>
     </fragment>
 
     <!-- Chat Fragment -->
     <fragment
         android:id="@+id/chatFragment"
         android:name="com.pakelcomedy.qleon.ui.chat.ChatFragment"
-        android:label="Chat">
+        android:label="Chat"
+        tools:layout="@layout/fragment_chat">
         <argument
             android:name="username"
-            app:argType="string" />
+            app:argType="string"
+            app:nullable="false" />
+        <argument
+            android:name="contactName"
+            app:argType="string"
+            app:nullable="true" />
     </fragment>
 
     <!-- New Chat Fragment -->
@@ -65,6 +82,10 @@
             <argument
                 android:name="username"
                 app:argType="string" />
+            <argument
+                android:name="contactName"
+                app:argType="string" />
         </action>
     </fragment>
+
 </navigation>

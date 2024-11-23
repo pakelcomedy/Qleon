@@ -6,20 +6,20 @@ import androidx.lifecycle.ViewModel
 
 class NewChatViewModel : ViewModel() {
 
-    // LiveData untuk username input
-    private val _username = MutableLiveData<String>()
+    // LiveData for username input, initializing with an empty string
+    private val _username = MutableLiveData<String>().apply { value = "" }
     val username: LiveData<String> get() = _username
 
-    // LiveData untuk menampilkan pesan
-    private val _message = MutableLiveData<String>()
+    // LiveData to display messages, initializing with an empty string
+    private val _message = MutableLiveData<String>().apply { value = "" }
     val message: LiveData<String> get() = _message
 
-    // Fungsi untuk mengupdate username
+    // Function to update the username
     fun updateUsername(newUsername: String) {
         _username.value = newUsername
     }
 
-    // Fungsi untuk logika koneksi
+    // Function for the connection logic
     fun connectToUser() {
         if (_username.value.isNullOrEmpty()) {
             _message.value = "Please enter a username"

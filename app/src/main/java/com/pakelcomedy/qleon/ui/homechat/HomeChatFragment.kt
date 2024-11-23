@@ -54,7 +54,7 @@ class HomeChatFragment : Fragment(R.layout.fragment_home_chat) {
 
     private fun navigateToChatFragment(contactName: String) {
         // Use the generated direction class to navigate
-        findNavController().navigate(R.id.action_homeChatFragment_to_chatFragment)
+        findNavController().navigate(R.id.action_homeFragment_to_chatFragment)
     }
 
     override fun onDestroyView() {

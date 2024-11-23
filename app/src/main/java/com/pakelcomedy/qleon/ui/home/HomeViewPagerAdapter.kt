@@ -1,17 +1,19 @@
 package com.pakelcomedy.qleon.ui.home
 
-import androidx.fragment.app.FragmentActivity
+import androidx.fragment.app.Fragment
 import androidx.viewpager2.adapter.FragmentStateAdapter
 import com.pakelcomedy.qleon.ui.homechat.HomeChatFragment
 import com.pakelcomedy.qleon.ui.newchat.NewChatFragment
 
-class HomeViewPagerAdapter(activity: FragmentActivity) : FragmentStateAdapter(activity) {
+class HomeViewPagerAdapter(fragment: Fragment) : FragmentStateAdapter(fragment) {
 
-    override fun getItemCount(): Int = 2  // Chats and New Chat tabs
+    override fun getItemCount(): Int = 2 // Two tabs: Home Chat and New Chat
 
-    override fun createFragment(position: Int) = when (position) {
-        0 -> HomeChatFragment() // Display HomeChatFragment in "Chats" tab
-        1 -> NewChatFragment() // Display NewChatFragment in "New Chat" tab
-        else -> throw IllegalStateException("Unexpected position $position")
+    override fun createFragment(position: Int): Fragment {
+        return when (position) {
+            0 -> HomeChatFragment() // Placeholder fragment for Home Chat
+            1 -> NewChatFragment() // New Chat
+            else -> throw IllegalStateException("Invalid position: $position")
+        }
     }
 }
