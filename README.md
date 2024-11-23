@@ -23,7 +23,7 @@ Qleon/
 │   │   │   │   │   │   ├── HomeChatViewModel.kt            # ViewModel untuk HomeChat
 │   │   │   │   ├── adapter/
 │   │   │   │   │   ├── ChatAdapter.kt                      # Adapter untuk daftar chat atau pesan
-│   │   │   │   │   ├── HomeAdapter.kt                      # Adapter untuk daftar Home atau pesan
+│   │   │   │   │   ├── ContactAdapter.kt                      # Adapter untuk daftar Home atau pesan
 │   │   │   │   ├── model/
 │   │   │   │   │   ├── Chat.kt                             # Model untuk chat
 │   │   │   │   │   ├── Message.kt                          # Model untuk pesan
