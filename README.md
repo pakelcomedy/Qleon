@@ -8,7 +8,8 @@ Qleon/
 │   │   │   │   │   ├── splash/
 │   │   │   │   │   │   └── SplashFragment.kt               # Splash Screen
 │   │   │   │   │   ├── auth/
-│   │   │   │   │   │   └── LoginFragment.kt                # Halaman login
+│   │   │   │   │   │   ├── LoginFragment.kt                # Halaman login
+│   │   │   │   │   │   └── LoginViewModel.kt                # Halaman login
 │   │   │   │   │   ├── home/
 │   │   │   │   │   │   ├── HomeFragment.kt                 # Halaman utama (daftar chat)
 │   │   │   │   │   │   ├── HomeViewPagerAdapter.kt                 # Halaman utama (daftar chat)
