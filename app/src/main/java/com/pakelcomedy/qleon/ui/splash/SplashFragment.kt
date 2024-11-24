@@ -16,7 +16,7 @@ class SplashFragment : Fragment(R.layout.fragment_splash) {
         // Add a delay to show splash screen for 0.2 seconds before navigating
         Handler(Looper.getMainLooper()).postDelayed({
             // Navigate to the next fragment (e.g., HomeFragment or LoginFragment)
-            findNavController().navigate(R.id.action_splashFragment_to_homeFragment)
+            findNavController().navigate(R.id.action_splashFragment_to_loginFragment)
         }, 200) // Delay for 0.2 seconds (200 milliseconds)
     }
 }

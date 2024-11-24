@@ -1,0 +1,25 @@
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Background bubble -->
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#EDEDED" />
+            <corners
+                android:topLeftRadius="0dp"
+                android:topRightRadius="16dp"
+                android:bottomLeftRadius="16dp"
+                android:bottomRightRadius="16dp" />
+            <padding
+                android:left="16dp"
+                android:top="8dp"
+                android:right="16dp"
+                android:bottom="8dp" />
+        </shape>
+    </item>
+
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#EDEDED" />
+            <pathData android:pathData="M0,0 L16,8 L0,16 Z" />
+        </shape>
+    </item>
+</layer-list>

@@ -7,7 +7,7 @@
     android:background="#141414"
     tools:context=".ui.home.HomeFragment">
 
-    <!-- Container untuk Teks Navigasi -->
+    <!-- Container for Vertical Navigation Buttons -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/navigationContainer"
         android:layout_width="match_parent"
@@ -15,67 +15,46 @@
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        android:layout_marginTop="16dp">
+        android:layout_marginTop="16dp"
+        android:paddingHorizontal="16dp">
 
-        <!-- Teks Navigasi Kiri (Chats) -->
-        <TextView
-            android:id="@+id/chatsText"
-            android:layout_width="wrap_content"
+        <!-- Top Navigation Button (Chats) -->
+        <Button
+            android:id="@+id/chatsButton"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:text="Chats"
             android:textColor="#FFFFFF"
             android:textStyle="bold"
-            android:textSize="20sp"
-            android:layout_marginStart="100dp"
-            app:layout_constraintTop_toTopOf="parent"
-            app:layout_constraintStart_toStartOf="parent"
-            android:gravity="start" />
+            android:textSize="24sp"
+        android:gravity="center"
+        android:layout_marginBottom="16dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:paddingVertical="24dp"
+        android:paddingHorizontal="32dp"
+        android:elevation="6dp"
+        android:backgroundTint="#1C1C1C"/>
 
-        <!-- Garis Bawah untuk Teks "Chats" -->
-        <View
-            android:id="@+id/chatsUnderline"
-            android:layout_width="50dp"
-            android:layout_height="2dp"
-            android:background="#00A8FF"
-            app:layout_constraintTop_toBottomOf="@id/chatsText"
-            app:layout_constraintStart_toStartOf="@id/chatsText"
-            android:layout_marginTop="4dp"
-            android:visibility="visible" />
-
-        <!-- Teks Navigasi Kanan (New Chat) -->
-        <TextView
-            android:id="@+id/newChatText"
-            android:layout_width="wrap_content"
+        <!-- Bottom Navigation Button (New Chat) -->
+        <Button
+            android:id="@+id/newChatButton"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:text="New Chat"
             android:textColor="#FFFFFF"
             android:textStyle="normal"
-            android:textSize="20sp"
-            android:layout_marginEnd="100dp"
-            app:layout_constraintTop_toTopOf="parent"
-            app:layout_constraintEnd_toEndOf="parent"
-            android:gravity="end" />
-
-        <!-- Garis Bawah untuk Teks "New Chat" -->
-        <View
-            android:id="@+id/newChatUnderline"
-            android:layout_width="50dp"
-            android:layout_height="2dp"
-            android:background="#00A8FF"
-            app:layout_constraintTop_toBottomOf="@id/newChatText"
-            app:layout_constraintEnd_toEndOf="@id/newChatText"
-            android:layout_marginTop="4dp"
-            android:visibility="gone" />
-    </androidx.constraintlayout.widget.ConstraintLayout>
-
-    <!-- ViewPager2 untuk konten fragment -->
-    <androidx.viewpager2.widget.ViewPager2
-        android:id="@+id/viewPager"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        app:layout_constraintTop_toBottomOf="@id/navigationContainer"
-        app:layout_constraintBottom_toBottomOf="parent"
+            android:textSize="24sp"
+        android:gravity="center"
+        app:layout_constraintTop_toBottomOf="@id/chatsButton"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
+        app:layout_constraintEnd_toEndOf="parent"
+        android:paddingVertical="24dp"
+        android:paddingHorizontal="32dp"
+        android:elevation="6dp"
+        android:backgroundTint="#1C1C1C" />
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

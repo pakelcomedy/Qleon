@@ -41,8 +41,15 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
+        android:layout_margin="16dp"
         android:padding="8dp"
-        android:background="#252525"
+        android:background="@android:color/white"
+        android:backgroundTint="#252525"
+        android:elevation="8dp"
+        android:clipToPadding="false"
+        android:clipChildren="false"
+        android:layout_gravity="center"
+        android:translationZ="8dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
@@ -56,7 +63,6 @@
             android:layout_gravity="center_vertical"
             app:tint="#D3D3D3" />
 
-
         <!-- Message Input -->
         <EditText
             android:id="@+id/message_input"
@@ -69,17 +75,18 @@
             android:textColor="#FFFFFF"
             android:textColorHint="#D3D3D3"
             android:padding="12dp"
+            android:background="@android:color/transparent"
             android:inputType="text"
             android:gravity="start|center_vertical" />
 
         <!-- Send Button -->
         <ImageView
             android:id="@+id/send_button"
-            android:layout_width="28dp"
-            android:layout_height="28dp"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
             android:src="@drawable/send"
-        android:layout_gravity="center_vertical"
-        app:tint="#00AFFF" />
+            android:layout_gravity="center_vertical"
+            android:padding="4dp"
+            app:tint="#FFFFFF" />
     </LinearLayout>
-
 </androidx.constraintlayout.widget.ConstraintLayout>

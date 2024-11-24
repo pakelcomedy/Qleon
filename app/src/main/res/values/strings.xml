@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">Qleon</string>
     <string name="at_symbol">\@</string>
+    <string name="default_web_client_id">573031199802-e69trnoghodmfhkg60trj8p5tl0gs0i8.apps.googleusercontent.com</string>
 </resources>

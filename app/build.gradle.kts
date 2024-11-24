@@ -1,7 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
-//    id("com.google.gms.google-services")
+    id("com.google.gms.google-services")
     id ("androidx.navigation.safeargs.kotlin")
 }
 
@@ -60,6 +60,15 @@ dependencies {
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
+
+    implementation(platform("com.google.firebase:firebase-bom:33.6.0"))
+    implementation("com.google.firebase:firebase-analytics")
+    implementation ("com.google.firebase:firebase-auth-ktx:22.1.0")
+    implementation ("com.google.firebase:firebase-database-ktx")
+    implementation ("com.google.firebase:firebase-firestore-ktx")
+
+// Google Sign-In
+    implementation ("com.google.android.gms:play-services-auth:20.7.0")
 
     // Testing
     testImplementation(libs.junit)
