@@ -1,5 +1,46 @@
 ```
 Qleon/
+├── index.html                  
+│
+├── pages/                      
+│   ├── chat.html               
+│   ├── contacts.html           
+│   ├── login.html              
+│   ├── profile.html            
+│   ├── settings.html           
+│   ├── call.html               
+│   ├── group.html              
+│   ├── about.html              
+│   └── privacy.html            
+│
+├── assets/                     
+│   ├── css/
+│   │   ├── base.css            # Reset + variable global (warna, font, spacing)
+│   │   ├── layout.css          # Struktur layout umum (header, sidebar, grid)
+│   │   ├── components.css      # Komponen UI (button, card, form, modal)
+│   │   ├── chat.css            # Styling spesifik untuk chat.html
+│   │   ├── contacts.css        # Styling spesifik untuk contacts.html
+│   │   ├── login.css           # Styling spesifik untuk login.html
+│   │   ├── profile.css         # Styling spesifik untuk profile.html
+│   │   ├── settings.css        # Styling spesifik untuk settings.html
+│   │   ├── call.css            # Styling spesifik untuk call.html
+│   │   ├── group.css           # Styling spesifik untuk group.html
+│   │   ├── about.css           # Styling spesifik untuk about.html
+│   │   └── privacy.css         # Styling spesifik untuk privacy.html
+│   │
+│   └── js/
+│       ├── app.js              
+│       ├── ui.js               
+│       ├── chat.js             
+│       ├── call.js             
+│       └── settings.js         
+│
+├── README.md                   
+└── LICENSE                     
+```
+
+```
+Qleon/
 ├── app/
 │   ├── src/
 │   │   ├── main/
