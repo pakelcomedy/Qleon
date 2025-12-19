@@ -26,16 +26,15 @@ dependencies:
   # 🧠 State Management & DI
   flutter_riverpod: ^2.5.1
   get_it: ^8.0.3
-
-  # 🔔 Notifications
-  flutter_local_notifications: ^17.2.2
-
+  
   # 🌐 Connectivity
   connectivity_plus: ^6.1.0
 
   # 🎨 UI Helpers
   cupertino_icons: ^1.0.8
   intl: ^0.18.0
+  mobile_scanner: ^5.0.0
+  qr_flutter: ^4.1.0
 
 dev_dependencies:
   flutter_test:

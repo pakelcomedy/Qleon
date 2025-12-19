@@ -1,17 +1,7 @@
-// lib/main.dart (ubah sesuai ini)
 import 'package:flutter/material.dart';
-import 'package:firebase_core/firebase_core.dart';
+import 'app/app_routes.dart';
 
-import 'core/theme/app_theme.dart';
-import 'routes/app_routes.dart';
-import 'di/locator.dart'; // sebelumnya injection.dart
-
-Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  await Firebase.initializeApp();
-  await setupLocator(); // nama fungsi di locator.dart
-
+void main() {
   runApp(const QleonApp());
 }
 
@@ -21,11 +11,20 @@ class QleonApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Qleon',
+      title: 'Qleon Chat',
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.dark(), // gunakan dark() karena kita buat dark()
-      onGenerateRoute: AppRoutes.onGenerateRoute,
-      initialRoute: AppRoutes.login,
+      initialRoute: AppRoutes.shell,
+      routes: AppRoutes.routes,
+      theme: ThemeData(
+        useMaterial3: true,
+        colorSchemeSeed: Colors.indigo,
+        scaffoldBackgroundColor: const Color(0xFFF7F8FA),
+        appBarTheme: const AppBarTheme(
+          centerTitle: false,
+          backgroundColor: Colors.white,
+          elevation: 0,
+        ),
+      ),
     );
   }
 }
