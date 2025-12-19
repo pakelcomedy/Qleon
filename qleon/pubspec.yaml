@@ -1,0 +1,47 @@
+name: qleon
+description: Private, secure chat application built with Flutter & Firebase
+publish_to: "none"
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 🔥 Firebase Core
+  firebase_core: ^3.6.0
+  firebase_auth: ^5.4.0
+  cloud_firestore: ^5.6.0
+  firebase_storage: ^12.4.0
+  firebase_messaging: ^15.2.0
+
+  # 🔐 Security & Encryption
+  flutter_secure_storage: ^9.2.2
+  cryptography: ^2.7.0
+  pointycastle: ^3.9.0
+
+  # 🧠 State Management & DI
+  flutter_riverpod: ^2.5.1
+  get_it: ^8.0.3
+
+  # 🔔 Notifications
+  flutter_local_notifications: ^17.2.2
+
+  # 🌐 Connectivity
+  connectivity_plus: ^6.1.0
+
+  # 🎨 UI Helpers
+  cupertino_icons: ^1.0.8
+  intl: ^0.18.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
