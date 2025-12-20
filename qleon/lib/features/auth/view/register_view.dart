@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import '../viewmodel/auth_viewmodel.dart';
+import '../../../app/app_routes.dart';
+import '../viewmodel/auth_viewmodel.dart'; // gunakan path yang benar di projectmu
 
 class RegisterView extends StatefulWidget {
   const RegisterView({super.key});
@@ -23,6 +24,12 @@ class _RegisterViewState extends State<RegisterView> {
     super.dispose();
   }
 
+  void _showErrorSnackBar(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -37,6 +44,26 @@ class _RegisterViewState extends State<RegisterView> {
         child: AnimatedBuilder(
           animation: vm,
           builder: (context, _) {
+            // HANDLE NAVIGATION when VM signals success
+            if (vm.isRegisteredSuccess) {
+              // schedule navigation after frame to avoid calling during build
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                // navigate to main app (ganti dengan route yang kamu mau)
+                Navigator.pushReplacementNamed(context, AppRoutes.shell);
+                // reset VM state so it won't trigger again
+                vm.resetRegistrationState();
+              });
+            }
+
+            // HANDLE ERROR snackbar
+            if (vm.errorMessage != null && vm.errorMessage!.isNotEmpty) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                _showErrorSnackBar(vm.errorMessage!);
+                // reset error after displayed
+                vm.resetRegistrationState();
+              });
+            }
+
             return LayoutBuilder(
               builder: (context, constraints) {
                 return SingleChildScrollView(
@@ -103,14 +130,17 @@ class _RegisterViewState extends State<RegisterView> {
                                       BorderRadius.circular(14),
                                 ),
                               ),
-                              onPressed:
-                                  vm.isLoading ? null : vm.register,
+                              onPressed: vm.isLoading
+                                  ? null
+                                  : () {
+                                      // View triggers VM register (VM tak perlu BuildContext)
+                                      vm.register();
+                                    },
                               child: vm.isLoading
                                   ? const SizedBox(
                                       width: 20,
                                       height: 20,
-                                      child:
-                                          CircularProgressIndicator(
+                                      child: CircularProgressIndicator(
                                         strokeWidth: 2,
                                         color: Colors.white,
                                       ),

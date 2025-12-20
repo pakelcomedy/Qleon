@@ -7,8 +7,13 @@ import 'di/locator.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 🔥 Init Firebase DEFAULT (tanpa firebase_options)
-  await Firebase.initializeApp();
+  try {
+    // Init Firebase default (pakai google-services.json auto config)
+    await Firebase.initializeApp();
+    debugPrint("🔥 Firebase initialized successfully");
+  } catch (e) {
+    debugPrint("❌ Firebase init failed: $e");
+  }
 
   // DI
   setupLocator();
@@ -24,10 +29,8 @@ class QleonApp extends StatelessWidget {
     return MaterialApp(
       title: 'Qleon',
       debugShowCheckedModeBanner: false,
-
       initialRoute: AppRoutes.splash,
       routes: AppRoutes.routes,
-
       theme: ThemeData(
         useMaterial3: true,
         colorSchemeSeed: Colors.indigo,
