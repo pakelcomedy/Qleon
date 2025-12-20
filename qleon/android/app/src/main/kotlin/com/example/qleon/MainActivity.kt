@@ -1,4 +1,4 @@
-package com.example.qleon
+package com.pakelcomedy.qleon
 
 import io.flutter.embedding.android.FlutterActivity
 
