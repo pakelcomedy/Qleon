@@ -1,7 +1,18 @@
 import 'package:flutter/material.dart';
-import 'app/app_routes.dart';
+import 'package:firebase_core/firebase_core.dart';
 
-void main() {
+import 'app/app_routes.dart';
+import 'di/locator.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // 🔥 Init Firebase DEFAULT (tanpa firebase_options)
+  await Firebase.initializeApp();
+
+  // DI
+  setupLocator();
+
   runApp(const QleonApp());
 }
 
@@ -13,8 +24,10 @@ class QleonApp extends StatelessWidget {
     return MaterialApp(
       title: 'Qleon',
       debugShowCheckedModeBanner: false,
-      initialRoute: AppRoutes.shell,
+
+      initialRoute: AppRoutes.splash,
       routes: AppRoutes.routes,
+
       theme: ThemeData(
         useMaterial3: true,
         colorSchemeSeed: Colors.indigo,
