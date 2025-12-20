@@ -81,20 +81,15 @@ lib/
 │   │   │   ├── new_chat_view.dart
 │   │   │   ├── contact_list_view.dart
 │   │   │   ├── add_contact_view.dart
-│   │   │   ├── chat_search_view.dart
-│   │   │   ├── chat_media_view.dart
-│   │   │   └── pinned_chat_view.dart
+│   │   │   ├── contact_detail_view.dart
 │   │   │
 │   │   └── viewmodel/
 │   │       └── chat_viewmodel.dart
 │   │
 │   ├── group/
 │   │   ├── view/
-│   │   │   ├── group_list_view.dart
 │   │   │   ├── create_group_view.dart
 │   │   │   ├── group_detail_view.dart
-│   │   │   ├── group_member_view.dart
-│   │   │   └── group_media_view.dart
 │   │   │
 │   │   └── viewmodel/
 │   │       └── group_viewmodel.dart
@@ -102,25 +97,14 @@ lib/
 │   ├── call/
 │   │   ├── view/
 │   │   │   ├── call_view.dart
-│   │   │   ├── incoming_call_view.dart
-│   │   │   ├── ongoing_call_view.dart
 │   │   │   └── call_history_view.dart
 │   │   │
 │   │   └── viewmodel/
 │   │       └── call_viewmodel.dart
 │   │
-│   ├── search/
-│   │   ├── view/
-│   │   │   ├── global_search_view.dart
-│   │   │   └── search_result_view.dart
-│   │   │
-│   │   └── viewmodel/
-│   │       └── global_search_viewmodel.dart
-│   │
 │   ├── archive/
 │   │   ├── view/
 │   │   │   ├── archive_view.dart
-│   │   │   └── archived_chat_detail_view.dart
 │   │   │
 │   │   └── viewmodel/
 │   │       └── archive_viewmodel.dart
@@ -131,7 +115,6 @@ lib/
 │   │   │   ├── profile_view.dart
 │   │   │   ├── privacy_view.dart
 │   │   │   ├── blocked_user_view.dart
-│   │   │   ├── notification_settings_view.dart
 │   │   │   ├── security_view.dart
 │   │   │   └── about_app_view.dart
 │   │   │
