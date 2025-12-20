@@ -1,13 +1,17 @@
 import 'package:flutter/material.dart';
 
-class GroupDetailView extends StatelessWidget {
+class GroupDetailView extends StatefulWidget {
   const GroupDetailView({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    const groupName = 'Flutter Devs';
-    const groupPublicId = '0xA94F32C1';
+  State<GroupDetailView> createState() => _GroupDetailViewState();
+}
 
+class _GroupDetailViewState extends State<GroupDetailView> {
+  List<DummyContact> _selectedMembers = [];
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFF1F3F6),
       appBar: AppBar(
@@ -29,49 +33,60 @@ class GroupDetailView extends StatelessWidget {
       body: ListView(
         children: [
           const SizedBox(height: 16),
-
-          /// GROUP IDENTITY
-          _GroupIdentitySection(
-            groupName: groupName,
-            groupPublicId: groupPublicId,
-          ),
-
+          const GroupIdentitySection(),
           const SizedBox(height: 24),
-
-          /// ADD MEMBERS
-          _AddMembersSection(),
-
+          _buildAddMembersSection(),
           const SizedBox(height: 24),
-
-          /// MEMBER LIST
-          _MemberSection(),
-
+          const MemberSection(),
           const SizedBox(height: 24),
-
-          /// EXIT GROUP
-          _ExitGroupSection(context),
-
+          const ExitGroupSection(),
           const SizedBox(height: 32),
         ],
       ),
     );
   }
+
+  Widget _buildAddMembersSection() {
+    return GestureDetector(
+      onTap: () async {
+        final result = await Navigator.push<List<DummyContact>>(
+          context,
+          MaterialPageRoute(builder: (_) => const AddMembersPage()),
+        );
+        if (result != null) {
+          setState(() => _selectedMembers = result);
+        }
+      },
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: ListTile(
+          leading: const Icon(Icons.person_add_alt_1, color: Color(0xFF4F46E5)),
+          title: const Text(
+            'Add members',
+            style: TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF111827)),
+          ),
+          subtitle: const Text('Invite via public identity or QR', style: TextStyle(fontSize: 12)),
+        ),
+      ),
+    );
+  }
 }
 
-/// =======================
+/// =============================================================
 /// GROUP IDENTITY
-/// =======================
-class _GroupIdentitySection extends StatelessWidget {
-  final String groupName;
-  final String groupPublicId;
-
-  const _GroupIdentitySection({
-    required this.groupName,
-    required this.groupPublicId,
-  });
+/// =============================================================
+class GroupIdentitySection extends StatelessWidget {
+  const GroupIdentitySection({super.key});
 
   @override
   Widget build(BuildContext context) {
+    const groupName = 'Flutter Devs';
+    const groupPublicId = '0xA94F32C1';
+
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
       padding: const EdgeInsets.all(20),
@@ -84,36 +99,22 @@ class _GroupIdentitySection extends StatelessWidget {
         children: [
           const Text(
             'Group identity',
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: Color(0xFF6B7280),
-            ),
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF6B7280)),
           ),
           const SizedBox(height: 12),
           Text(
             groupName,
-            style: const TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-              color: Color(0xFF111827),
-            ),
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Color(0xFF111827)),
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 6),
           Text(
-            'Public ID: $groupPublicId',
-            style: const TextStyle(
-              fontSize: 13,
-              color: Color(0xFF6B7280),
-            ),
+            'Public ID · $groupPublicId',
+            style: const TextStyle(fontSize: 13, letterSpacing: 0.6, color: Color(0xFF4F46E5)),
           ),
           const SizedBox(height: 12),
           TextButton(
-            onPressed: () => _showRenameDialog(context, groupName),
-            child: const Text(
-              'Edit group name',
-              style: TextStyle(color: Color(0xFF4F46E5)),
-            ),
+            onPressed: () => showRenameDialog(context, groupName),
+            child: const Text('Edit group name', style: TextStyle(color: Color(0xFF4F46E5))),
           ),
         ],
       ),
@@ -121,46 +122,147 @@ class _GroupIdentitySection extends StatelessWidget {
   }
 }
 
-/// =======================
-/// ADD MEMBERS
-/// =======================
-class _AddMembersSection extends StatelessWidget {
+/// =============================================================
+/// ADD MEMBERS PAGE
+/// =============================================================
+class AddMembersPage extends StatefulWidget {
+  const AddMembersPage({super.key});
+
+  @override
+  State<AddMembersPage> createState() => _AddMembersPageState();
+}
+
+class _AddMembersPageState extends State<AddMembersPage> {
+  final TextEditingController _searchController = TextEditingController();
+  String _query = '';
+  final Set<DummyContact> _selectedMembers = {};
+
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: ListTile(
-        leading: const CircleAvatar(
-          backgroundColor: Color(0xFFEEF2FF),
-          child: Icon(Icons.person_add, color: Color(0xFF4F46E5)),
-        ),
-        title: const Text(
-          'Add members',
-          style: TextStyle(
-            fontWeight: FontWeight.w600,
-            color: Color(0xFF111827),
+    final filteredContacts = dummyContacts
+        .where((c) => c.name.toLowerCase().contains(_query.toLowerCase()))
+        .toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Select Members'),
+        backgroundColor: Colors.white,
+        foregroundColor: const Color(0xFF111827),
+        elevation: 1,
+        actions: [
+          TextButton(
+            onPressed: _selectedMembers.isEmpty
+                ? null
+                : () => Navigator.pop(context, _selectedMembers.toList()),
+            child: const Text('Done', style: TextStyle(color: Color(0xFF4F46E5), fontWeight: FontWeight.bold)),
           ),
-        ),
-        subtitle: const Text(
-          'Invite contacts to this group',
-          style: TextStyle(fontSize: 12),
-        ),
-        onTap: () {
-          // TODO: Navigate to Add Members flow (reuse NewChat / contact picker)
-        },
+        ],
       ),
+      body: Column(
+        children: [
+          if (_selectedMembers.isNotEmpty) _buildSelectedPreview(),
+          _buildSearchBar(),
+          Expanded(child: _buildContactList(filteredContacts)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSelectedPreview() {
+    return SizedBox(
+      height: 50,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        children: _selectedMembers.map((contact) {
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: GestureDetector(
+              onTap: () => setState(() => _selectedMembers.remove(contact)),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF4F46E5).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  children: [
+                    Text(contact.name, style: const TextStyle(fontSize: 14)),
+                    const SizedBox(width: 6),
+                    const Icon(Icons.close, size: 16, color: Color(0xFF4F46E5)),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildSearchBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+      child: Container(
+        height: 46,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 10)],
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.search, color: Colors.grey),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: _searchController,
+                decoration: const InputDecoration(hintText: 'Search contacts', border: InputBorder.none),
+                onChanged: (value) => setState(() => _query = value),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildContactList(List<DummyContact> contacts) {
+    return ListView.builder(
+      padding: const EdgeInsets.all(12),
+      itemCount: contacts.length,
+      itemBuilder: (context, index) {
+        final contact = contacts[index];
+        final selected = _selectedMembers.contains(contact);
+        return GestureDetector(
+          onTap: () => setState(() {
+            selected ? _selectedMembers.remove(contact) : _selectedMembers.add(contact);
+          }),
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(18)),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(contact.name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+                if (selected) const Icon(Icons.check_circle, color: Color(0xFF4F46E5)),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
 
-/// =======================
+/// =============================================================
 /// MEMBER SECTION
-/// =======================
-class _MemberSection extends StatelessWidget {
+/// =============================================================
+class MemberSection extends StatelessWidget {
+  const MemberSection({super.key});
+
   @override
   Widget build(BuildContext context) {
     const isCurrentUserAdmin = true;
@@ -170,86 +272,54 @@ class _MemberSection extends StatelessWidget {
       children: [
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Text(
-            '${dummyMembers.length} participants',
-            style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
-              color: Color(0xFF6B7280),
-            ),
-          ),
+          child: Text('${dummyMembers.length} participants',
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Color(0xFF6B7280))),
         ),
         const SizedBox(height: 8),
         ...dummyMembers.map(
-          (member) => _MemberTile(
-            member: member,
-            isAdmin: isCurrentUserAdmin,
-          ),
+          (member) => MemberTile(member: member, canManage: isCurrentUserAdmin),
         ),
       ],
     );
   }
 }
 
-/// =======================
-/// MEMBER TILE
-/// =======================
-class _MemberTile extends StatelessWidget {
+class MemberTile extends StatelessWidget {
   final GroupMember member;
-  final bool isAdmin;
+  final bool canManage;
 
-  const _MemberTile({
-    required this.member,
-    required this.isAdmin,
-  });
+  const MemberTile({super.key, required this.member, required this.canManage});
 
   @override
   Widget build(BuildContext context) {
     return Container(
       color: Colors.white,
       child: ListTile(
-        leading: CircleAvatar(
-          backgroundImage: NetworkImage(member.avatarUrl),
+        leading: Icon(
+          member.isSelf
+              ? Icons.person
+              : member.isAdmin
+                  ? Icons.shield_outlined
+                  : Icons.person_outline,
+          color: member.isAdmin ? const Color(0xFF4F46E5) : Colors.grey,
         ),
-        title: Text(
-          member.name,
-          style: const TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w500,
-            color: Color(0xFF111827),
-          ),
+        title: Text(member.displayName,
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: Color(0xFF111827))),
+        subtitle: Text(
+          member.isSelf ? 'You' : member.isAdmin ? 'Admin' : 'Member',
+          style: TextStyle(fontSize: 12, color: member.isAdmin ? const Color(0xFF4F46E5) : const Color(0xFF6B7280)),
         ),
-        subtitle: member.isAdmin
-            ? const Text(
-                'Admin',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Color(0xFF4F46E5),
-                  fontWeight: FontWeight.w500,
-                ),
-              )
-            : null,
-        trailing: isAdmin && !member.isSelf
+        trailing: canManage && !member.isSelf
             ? PopupMenuButton<String>(
-                onSelected: (value) =>
-                    _handleMemberAction(context, value, member),
+                onSelected: (value) => handleMemberAction(context, value, member),
                 itemBuilder: (_) => [
                   if (!member.isAdmin)
-                    const PopupMenuItem(
-                      value: 'make_admin',
-                      child: Text('Make admin'),
-                    ),
+                    const PopupMenuItem(value: 'make_admin', child: Text('Make admin')),
                   if (member.isAdmin)
-                    const PopupMenuItem(
-                      value: 'remove_admin',
-                      child: Text('Remove admin'),
-                    ),
+                    const PopupMenuItem(value: 'remove_admin', child: Text('Remove admin')),
                   const PopupMenuItem(
                     value: 'remove',
-                    child: Text(
-                      'Remove from group',
-                      style: TextStyle(color: Colors.red),
-                    ),
+                    child: Text('Remove from group', style: TextStyle(color: Colors.red)),
                   ),
                 ],
               )
@@ -259,13 +329,11 @@ class _MemberTile extends StatelessWidget {
   }
 }
 
-/// =======================
+/// =============================================================
 /// EXIT GROUP
-/// =======================
-class _ExitGroupSection extends StatelessWidget {
-  final BuildContext context;
-
-  const _ExitGroupSection(this.context);
+/// =============================================================
+class ExitGroupSection extends StatelessWidget {
+  const ExitGroupSection({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -273,156 +341,96 @@ class _ExitGroupSection extends StatelessWidget {
       color: Colors.white,
       child: ListTile(
         leading: const Icon(Icons.logout, color: Colors.red),
-        title: const Text(
-          'Exit group',
-          style: TextStyle(
-            color: Colors.red,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        onTap: () => _confirmDialog(
-          this.context,
-          title: 'Exit group?',
-          message: 'You will no longer receive messages from this group.',
-        ),
+        title: const Text('Exit group', style: TextStyle(color: Colors.red, fontWeight: FontWeight.w600)),
+        onTap: () => confirmDialog(context,
+            title: 'Exit group?', message: 'You will no longer receive messages from this group.'),
       ),
     );
   }
 }
 
-/// =======================
+/// =============================================================
 /// DIALOGS
-/// =======================
-void _showRenameDialog(BuildContext context, String currentName) {
+/// =============================================================
+void showRenameDialog(BuildContext context, String currentName) {
   final controller = TextEditingController(text: currentName);
 
   showDialog(
     context: context,
     builder: (_) => AlertDialog(
       title: const Text('Edit group name'),
-      content: TextField(
-        controller: controller,
-        decoration: const InputDecoration(
-          hintText: 'Enter new name',
-        ),
-      ),
+      content: TextField(controller: controller, decoration: const InputDecoration(hintText: 'Enter new name')),
       actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
         TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        TextButton(
-          onPressed: () {
-            Navigator.pop(context);
-          },
-          child: const Text(
-            'Save',
-            style: TextStyle(
-              color: Color(0xFF4F46E5),
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Save', style: TextStyle(color: Color(0xFF4F46E5), fontWeight: FontWeight.bold))),
       ],
     ),
   );
 }
 
-void _handleMemberAction(
-  BuildContext context,
-  String action,
-  GroupMember member,
-) {
-  String title = '';
-  String message = '';
+void handleMemberAction(BuildContext context, String action, GroupMember member) {
+  final title = switch (action) {
+    'make_admin' => 'Make admin?',
+    'remove_admin' => 'Remove admin?',
+    _ => 'Remove member?',
+  };
 
-  switch (action) {
-    case 'make_admin':
-      title = 'Make admin?';
-      message = '${member.name} will gain admin privileges.';
-      break;
-    case 'remove_admin':
-      title = 'Remove admin?';
-      message = '${member.name} will no longer be an admin.';
-      break;
-    case 'remove':
-      title = 'Remove member?';
-      message = '${member.name} will be removed from this group.';
-      break;
-  }
+  final message = switch (action) {
+    'make_admin' => '${member.displayName} will gain admin privileges.',
+    'remove_admin' => '${member.displayName} will lose admin privileges.',
+    _ => '${member.displayName} will be removed from this group.',
+  };
 
-  _confirmDialog(context, title: title, message: message);
+  confirmDialog(context, title: title, message: message);
 }
 
-void _confirmDialog(
-  BuildContext context, {
-  required String title,
-  required String message,
-}) {
+void confirmDialog(BuildContext context, {required String title, required String message}) {
   showDialog(
     context: context,
     builder: (_) => AlertDialog(
       title: Text(title),
       content: Text(message),
       actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
         TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        TextButton(
-          onPressed: () {
-            Navigator.pop(context);
-          },
-          child: const Text(
-            'Confirm',
-            style: TextStyle(color: Colors.red),
-          ),
-        ),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Confirm', style: TextStyle(color: Colors.red))),
       ],
     ),
   );
 }
 
-/// =======================
-/// DUMMY DATA
-/// =======================
+/// =============================================================
+/// MODELS & DUMMY DATA
+/// =============================================================
 class GroupMember {
-  final String id;
-  final String name;
-  final String avatarUrl;
+  final String publicId;
+  final String displayName;
   final bool isAdmin;
   final bool isSelf;
 
-  const GroupMember({
-    required this.id,
-    required this.name,
-    required this.avatarUrl,
-    this.isAdmin = false,
-    this.isSelf = false,
-  });
+  const GroupMember({required this.publicId, required this.displayName, this.isAdmin = false, this.isSelf = false});
 }
 
-const dummyMembers = [
-  GroupMember(
-    id: 'u1',
-    name: 'You',
-    avatarUrl: 'https://i.pravatar.cc/150?img=1',
-    isAdmin: true,
-    isSelf: true,
-  ),
-  GroupMember(
-    id: 'u2',
-    name: 'Andi Wijaya',
-    avatarUrl: 'https://i.pravatar.cc/150?img=41',
-  ),
-  GroupMember(
-    id: 'u3',
-    name: 'Budi Santoso',
-    avatarUrl: 'https://i.pravatar.cc/150?img=12',
-  ),
-  GroupMember(
-    id: 'u4',
-    name: 'Citra Lestari',
-    avatarUrl: 'https://i.pravatar.cc/150?img=27',
-  ),
+class DummyContact {
+  final String id;
+  final String name;
+
+  const DummyContact({required this.id, required this.name});
+}
+
+final dummyContacts = [
+  const DummyContact(id: 'u1', name: 'Andi Wijaya'),
+  const DummyContact(id: 'u2', name: 'Budi Santoso'),
+  const DummyContact(id: 'u3', name: 'Citra Lestari'),
+  const DummyContact(id: 'u4', name: 'Dosen PA'),
+];
+
+final dummyMembers = [
+  const GroupMember(publicId: '0x001', displayName: 'You', isAdmin: true, isSelf: true),
+  const GroupMember(publicId: '0xA19F', displayName: 'Andi Wijaya'),
+  const GroupMember(publicId: '0xB88C', displayName: 'Budi Santoso'),
+  const GroupMember(publicId: '0xC312', displayName: 'Citra Lestari'),
 ];

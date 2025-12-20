@@ -13,6 +13,23 @@ class _CallViewState extends State<CallView> {
   bool _isVideoOn = false;
 
   @override
+  void initState() {
+    super.initState();
+    _isSpeakerOn = false;
+  }
+
+  void _toggleVideo() {
+    setState(() {
+      _isVideoOn = !_isVideoOn;
+
+      /// FORCE LOUDSPEAKER WHEN VIDEO CALL
+      if (_isVideoOn) {
+        _isSpeakerOn = true;
+      }
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
@@ -29,19 +46,35 @@ class _CallViewState extends State<CallView> {
   }
 
   /// =============================================================
-  /// BACKGROUND (Avatar / Video Placeholder)
+  /// BACKGROUND (VOICE / VIDEO PLACEHOLDER)
   /// =============================================================
   Widget _buildBackground() {
+    if (_isVideoOn) {
+      /// VIDEO CALL PLACEHOLDER
+      return Container(
+        color: Colors.black,
+        alignment: Alignment.center,
+        child: const Text(
+          'Video Stream',
+          style: TextStyle(
+            color: Colors.white38,
+            fontSize: 16,
+          ),
+        ),
+      );
+    }
+
+    /// VOICE CALL UI
     return Container(
       alignment: Alignment.center,
+      padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: const [
-          CircleAvatar(
-            radius: 64,
-            backgroundImage: NetworkImage(
-              'https://i.pravatar.cc/300?img=11',
-            ),
+          Icon(
+            Icons.call,
+            size: 72,
+            color: Colors.white54,
           ),
           SizedBox(height: 20),
           Text(
@@ -51,6 +84,7 @@ class _CallViewState extends State<CallView> {
               fontSize: 22,
               fontWeight: FontWeight.w600,
             ),
+            textAlign: TextAlign.center,
           ),
           SizedBox(height: 6),
           Text(
@@ -74,7 +108,7 @@ class _CallViewState extends State<CallView> {
       left: 0,
       right: 0,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 8),
         child: Row(
           children: [
             IconButton(
@@ -92,7 +126,7 @@ class _CallViewState extends State<CallView> {
   /// =============================================================
   Widget _buildCallControls(BuildContext context) {
     return Positioned(
-      bottom: 24,
+      bottom: 28,
       left: 0,
       right: 0,
       child: Column(
@@ -112,23 +146,26 @@ class _CallViewState extends State<CallView> {
                 icon: _isSpeakerOn ? Icons.volume_up : Icons.volume_off,
                 label: 'Speaker',
                 isActive: _isSpeakerOn,
-                onTap: () {
-                  setState(() => _isSpeakerOn = !_isSpeakerOn);
-                },
+                onTap: _isVideoOn
+                    ? null // disable manual toggle when VC
+                    : () {
+                        setState(
+                          () => _isSpeakerOn = !_isSpeakerOn,
+                        );
+                      },
               ),
               _CallButton(
                 icon: _isVideoOn ? Icons.videocam : Icons.videocam_off,
                 label: 'Video',
                 isActive: _isVideoOn,
-                onTap: () {
-                  setState(() => _isVideoOn = !_isVideoOn);
-                },
+                onTap: _toggleVideo,
               ),
             ],
           ),
           const SizedBox(height: 28),
           FloatingActionButton(
             backgroundColor: Colors.red,
+            elevation: 4,
             onPressed: () => Navigator.pop(context),
             child: const Icon(Icons.call_end),
           ),
@@ -145,7 +182,7 @@ class _CallButton extends StatelessWidget {
   final IconData icon;
   final String label;
   final bool isActive;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   const _CallButton({
     required this.icon,
@@ -158,26 +195,30 @@ class _CallButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: Column(
-        children: [
-          CircleAvatar(
-            radius: 28,
-            backgroundColor: isActive ? Colors.white : Colors.white24,
-            child: Icon(
-              icon,
-              color: isActive ? Colors.black : Colors.white,
-              size: 26,
+      child: Opacity(
+        opacity: onTap == null ? 0.4 : 1,
+        child: Column(
+          children: [
+            CircleAvatar(
+              radius: 28,
+              backgroundColor:
+                  isActive ? Colors.white : Colors.white24,
+              child: Icon(
+                icon,
+                color: isActive ? Colors.black : Colors.white,
+                size: 26,
+              ),
             ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            label,
-            style: const TextStyle(
-              color: Colors.white70,
-              fontSize: 12,
+            const SizedBox(height: 6),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 12,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

@@ -17,9 +17,7 @@ class _CreateGroupViewState extends State<CreateGroupView> {
   @override
   Widget build(BuildContext context) {
     final filteredContacts = dummyContacts
-        .where(
-          (c) => c.name.toLowerCase().contains(_query.toLowerCase()),
-        )
+        .where((c) => c.name.toLowerCase().contains(_query.toLowerCase()))
         .toList();
 
     return Scaffold(
@@ -28,10 +26,7 @@ class _CreateGroupViewState extends State<CreateGroupView> {
       body: Column(
         children: [
           _buildGroupNameInput(),
-
-          if (_selectedMembers.isNotEmpty)
-            _buildSelectedPreview(),
-
+          if (_selectedMembers.isNotEmpty) _buildSelectedPreview(),
           _buildSearchBar(),
           Expanded(child: _buildContactList(filteredContacts)),
         ],
@@ -94,62 +89,44 @@ class _CreateGroupViewState extends State<CreateGroupView> {
   /// =============================================================
   /// SELECTED MEMBERS PREVIEW
   /// =============================================================
-Widget _buildSelectedPreview() {
-  return SizedBox(
-    height: 86,
-    child: ListView(
-      scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      children: _selectedMembers.map((contact) {
-        return Padding(
-          padding: const EdgeInsets.only(right: 12),
-          child: Column(
-            children: [
-              Stack(
-                children: [
-                  CircleAvatar(
-                    radius: 26,
-                    backgroundImage: NetworkImage(contact.avatarUrl),
-                  ),
-                  Positioned(
-                    right: -2,
-                    top: -2,
-                    child: GestureDetector(
-                      onTap: () {
-                        setState(() {
-                          _selectedMembers.remove(contact);
-                        });
-                      },
-                      child: const CircleAvatar(
-                        radius: 10,
-                        backgroundColor: Colors.red,
-                        child: Icon(
-                          Icons.close,
-                          size: 12,
-                          color: Colors.white,
-                        ),
-                      ),
+  Widget _buildSelectedPreview() {
+    return SizedBox(
+      height: 40,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        children: _selectedMembers.map((contact) {
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: GestureDetector(
+              onTap: () {
+                setState(() {
+                  _selectedMembers.remove(contact);
+                });
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF4F46E5).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  children: [
+                    Text(
+                      contact.name,
+                      style: const TextStyle(fontSize: 14),
                     ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              SizedBox(
-                width: 52,
-                child: Text(
-                  contact.name,
-                  style: const TextStyle(fontSize: 12),
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
+                    const SizedBox(width: 6),
+                    const Icon(Icons.close, size: 16, color: Color(0xFF4F46E5)),
+                  ],
                 ),
               ),
-            ],
-          ),
-        );
-      }).toList(),
-    ),
-  );
-}
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
 
   /// =============================================================
   /// SEARCH BAR
@@ -165,7 +142,7 @@ Widget _buildSelectedPreview() {
           borderRadius: BorderRadius.circular(14),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.04),
+              color: Colors.black.withOpacity(0.04),
               blurRadius: 10,
             ),
           ],
@@ -181,9 +158,7 @@ Widget _buildSelectedPreview() {
                   hintText: 'Search contacts',
                   border: InputBorder.none,
                 ),
-                onChanged: (value) {
-                  setState(() => _query = value);
-                },
+                onChanged: (value) => setState(() => _query = value),
               ),
             ),
           ],
@@ -213,25 +188,19 @@ Widget _buildSelectedPreview() {
           },
           child: Container(
             margin: const EdgeInsets.only(bottom: 10),
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.circular(18),
             ),
             child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                CircleAvatar(
-                  radius: 26,
-                  backgroundImage: NetworkImage(contact.avatarUrl),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    contact.name,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 15,
-                    ),
+                Text(
+                  contact.name,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 15,
                   ),
                 ),
                 if (selected)
@@ -254,11 +223,7 @@ Widget _buildSelectedPreview() {
       _groupNameController.text.isNotEmpty && _selectedMembers.isNotEmpty;
 
   void _createGroup() {
-    /// TODO:
-    /// - generate groupId
-    /// - save group (name + members)
-    /// - navigate to GroupChatView
-
+    // TODO: implement group creation logic
     Navigator.pop(context);
   }
 }
@@ -269,12 +234,10 @@ Widget _buildSelectedPreview() {
 class _DummyContact {
   final String id;
   final String name;
-  final String avatarUrl;
 
   const _DummyContact({
     required this.id,
     required this.name,
-    required this.avatarUrl,
   });
 }
 
@@ -282,24 +245,8 @@ class _DummyContact {
 /// DUMMY DATA
 /// =============================================================
 const dummyContacts = [
-  _DummyContact(
-    id: 'u1',
-    name: 'Andi Wijaya',
-    avatarUrl: 'https://i.pravatar.cc/150?img=41',
-  ),
-  _DummyContact(
-    id: 'u2',
-    name: 'Budi Santoso',
-    avatarUrl: 'https://i.pravatar.cc/150?img=12',
-  ),
-  _DummyContact(
-    id: 'u3',
-    name: 'Citra Lestari',
-    avatarUrl: 'https://i.pravatar.cc/150?img=27',
-  ),
-  _DummyContact(
-    id: 'u4',
-    name: 'Dosen PA',
-    avatarUrl: 'https://i.pravatar.cc/150?img=6',
-  ),
+  _DummyContact(id: 'u1', name: 'Andi Wijaya'),
+  _DummyContact(id: 'u2', name: 'Budi Santoso'),
+  _DummyContact(id: 'u3', name: 'Citra Lestari'),
+  _DummyContact(id: 'u4', name: 'Dosen PA'),
 ];

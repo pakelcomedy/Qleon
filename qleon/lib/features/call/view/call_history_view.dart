@@ -53,9 +53,7 @@ class CallHistoryView extends StatelessWidget {
       actions: [
         IconButton(
           icon: const Icon(Icons.search, color: Color(0xFF374151)),
-          onPressed: () {
-            // TODO: search call history
-          },
+          onPressed: () {},
         ),
         PopupMenuButton<String>(
           icon: const Icon(Icons.more_vert, color: Color(0xFF374151)),
@@ -81,8 +79,8 @@ class CallHistoryView extends StatelessWidget {
 }
 
 /// =============================================================
-/// CALL CARD
-/// =============================================================
+/// CALL CARD (NO AVATAR)
+// =============================================================
 class _CallCard extends StatelessWidget {
   final _DummyCall call;
   final VoidCallback onTap;
@@ -100,7 +98,7 @@ class _CallCard extends StatelessWidget {
       onTap: onTap,
       child: Container(
         margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(18),
@@ -114,21 +112,20 @@ class _CallCard extends StatelessWidget {
         ),
         child: Row(
           children: [
-            CircleAvatar(
-              radius: 26,
-              backgroundImage: NetworkImage(call.avatarUrl),
-            ),
-            const SizedBox(width: 12),
+            _CallIdentityIndicator(call: call),
+            const SizedBox(width: 14),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    call.name,
+                    call.displayName,
                     style: TextStyle(
                       fontWeight: FontWeight.w600,
                       fontSize: 15,
-                      color: isMissed ? Colors.redAccent : Colors.black,
+                      color: isMissed
+                          ? Colors.redAccent
+                          : const Color(0xFF111827),
                     ),
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -140,12 +137,15 @@ class _CallCard extends StatelessWidget {
                             ? Icons.videocam_outlined
                             : Icons.call_outlined,
                         size: 14,
-                        color: Colors.grey,
+                        color: const Color(0xFF6B7280),
                       ),
-                      const SizedBox(width: 4),
+                      const SizedBox(width: 6),
                       Text(
                         call.subtitle,
-                        style: const TextStyle(color: Colors.grey),
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: Color(0xFF6B7280),
+                        ),
                       ),
                     ],
                   ),
@@ -157,17 +157,16 @@ class _CallCard extends StatelessWidget {
               children: [
                 Text(
                   call.time,
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF6B7280),
+                  ),
                 ),
                 const SizedBox(height: 6),
                 Icon(
-                  call.status == CallStatus.missed
-                      ? Icons.call_missed
-                      : Icons.call_made,
+                  _statusIcon(call.status),
                   size: 16,
-                  color: call.status == CallStatus.missed
-                      ? Colors.redAccent
-                      : Colors.green,
+                  color: _statusColor(call.status),
                 ),
               ],
             ),
@@ -176,56 +175,111 @@ class _CallCard extends StatelessWidget {
       ),
     );
   }
+
+  IconData _statusIcon(CallStatus status) {
+    switch (status) {
+      case CallStatus.incoming:
+        return Icons.call_received;
+      case CallStatus.outgoing:
+        return Icons.call_made;
+      case CallStatus.missed:
+        return Icons.call_missed;
+    }
+  }
+
+  Color _statusColor(CallStatus status) {
+    switch (status) {
+      case CallStatus.missed:
+        return Colors.redAccent;
+      default:
+        return Colors.green;
+    }
+  }
 }
 
 /// =============================================================
-/// DUMMY DATA (UI ONLY)
+/// IDENTITY INDICATOR
 /// =============================================================
+class _CallIdentityIndicator extends StatelessWidget {
+  final _DummyCall call;
+  const _CallIdentityIndicator({required this.call});
 
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 44,
+      height: 44,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: call.isGroup
+            ? const Color(0xFFE5E7EB)
+            : const Color(0xFFEEF2FF),
+      ),
+      child: Icon(
+        call.isGroup ? Icons.groups_outlined : Icons.person_outline,
+        color: call.isGroup
+            ? Colors.grey
+            : const Color(0xFF4F46E5),
+      ),
+    );
+  }
+}
+
+/// =============================================================
+/// MODELS (UI ONLY)
+// =============================================================
 enum CallType { voice, video }
 enum CallStatus { incoming, outgoing, missed }
 
 class _DummyCall {
-  final String avatarUrl;
-  final String name;
+  final String publicId;      // hasil QR / public identity
+  final String displayName;   // alias lokal
   final String subtitle;
   final String time;
   final CallType type;
   final CallStatus status;
+  final bool isGroup;
 
-  _DummyCall({
-    required this.avatarUrl,
-    required this.name,
+  const _DummyCall({
+    required this.publicId,
+    required this.displayName,
     required this.subtitle,
     required this.time,
     required this.type,
     required this.status,
+    required this.isGroup,
   });
 }
 
-final dummyCalls = [
+/// =============================================================
+/// DUMMY DATA
+/// =============================================================
+const dummyCalls = [
   _DummyCall(
-    avatarUrl: 'https://i.pravatar.cc/150?img=21',
-    name: 'Andi Wijaya',
+    publicId: '0xA91F23D9',
+    displayName: 'Andi Wijaya',
     subtitle: 'Outgoing • 3 min',
     time: '21:30',
     type: CallType.voice,
     status: CallStatus.outgoing,
+    isGroup: false,
   ),
   _DummyCall(
-    avatarUrl: 'https://i.pravatar.cc/150?img=35',
-    name: 'Tim Qleon',
+    publicId: '0x77BC119A',
+    displayName: 'Tim Qleon',
     subtitle: 'Missed call',
     time: '19:12',
     type: CallType.video,
     status: CallStatus.missed,
+    isGroup: true,
   ),
   _DummyCall(
-    avatarUrl: 'https://i.pravatar.cc/150?img=8',
-    name: 'Dosen PA',
+    publicId: '0x0021AA90',
+    displayName: 'Dosen PA',
     subtitle: 'Incoming • 5 min',
     time: 'Yesterday',
     type: CallType.voice,
     status: CallStatus.incoming,
+    isGroup: false,
   ),
 ];

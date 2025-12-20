@@ -38,7 +38,8 @@ class CallListView extends StatelessWidget {
       title: const Text(
         'Select contact',
         style: TextStyle(
-          fontWeight: FontWeight.bold,
+          fontSize: 16,
+          fontWeight: FontWeight.w600,
           color: Color(0xFF111827),
         ),
       ),
@@ -63,11 +64,14 @@ class CallListView extends StatelessWidget {
         ),
         child: const Row(
           children: [
-            Icon(Icons.search, color: Colors.grey),
+            Icon(Icons.search, color: Color(0xFF9CA3AF)),
             SizedBox(width: 8),
             Text(
               'Search contacts or groups',
-              style: TextStyle(color: Colors.grey),
+              style: TextStyle(
+                color: Color(0xFF9CA3AF),
+                fontSize: 13,
+              ),
             ),
           ],
         ),
@@ -88,7 +92,7 @@ class _CallContactCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(18),
@@ -102,11 +106,22 @@ class _CallContactCard extends StatelessWidget {
       ),
       child: Row(
         children: [
-          CircleAvatar(
-            radius: 26,
-            backgroundImage: NetworkImage(contact.avatarUrl),
+          /// ICON (NO PROFILE PHOTO)
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: const Color(0xFFF3F4F6),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(
+              contact.isGroup ? Icons.group : Icons.person,
+              color: const Color(0xFF4F46E5),
+            ),
           ),
           const SizedBox(width: 12),
+
+          /// NAME & STATUS
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -116,32 +131,31 @@ class _CallContactCard extends StatelessWidget {
                   style: const TextStyle(
                     fontWeight: FontWeight.w600,
                     fontSize: 15,
+                    color: Color(0xFF111827),
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 4),
                 Text(
                   contact.subtitle,
-                  style: const TextStyle(color: Colors.grey),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF6B7280),
+                  ),
                 ),
               ],
             ),
           ),
+
+          /// ACTIONS
           IconButton(
             icon: const Icon(Icons.call, color: Color(0xFF4F46E5)),
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => const CallView()),
-              );
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.videocam, color: Color(0xFF4F46E5)),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const CallView()),
+                MaterialPageRoute(
+                  builder: (_) => const CallView(),
+                ),
               );
             },
           ),
@@ -155,40 +169,34 @@ class _CallContactCard extends StatelessWidget {
 /// DUMMY DATA (UI ONLY)
 /// =============================================================
 class _CallContact {
-  final String avatarUrl;
   final String name;
   final String subtitle;
   final bool isGroup;
 
-  _CallContact({
-    required this.avatarUrl,
+  const _CallContact({
     required this.name,
     required this.subtitle,
     required this.isGroup,
   });
 }
 
-final dummyCallContacts = [
+const dummyCallContacts = [
   _CallContact(
-    avatarUrl: 'https://i.pravatar.cc/150?img=11',
     name: 'Andi Wijaya',
     subtitle: 'Online',
     isGroup: false,
   ),
   _CallContact(
-    avatarUrl: 'https://i.pravatar.cc/150?img=32',
     name: 'Budi Santoso',
     subtitle: 'Last seen 10 min ago',
     isGroup: false,
   ),
   _CallContact(
-    avatarUrl: 'https://i.pravatar.cc/150?img=5',
     name: 'Tim Qleon',
     subtitle: 'Group • 4 members',
     isGroup: true,
   ),
   _CallContact(
-    avatarUrl: 'https://i.pravatar.cc/150?img=18',
     name: 'Dosen PA',
     subtitle: 'Available',
     isGroup: false,
