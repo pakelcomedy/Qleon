@@ -6,7 +6,7 @@ import 'new_chat_view.dart';
 import '../../settings/view/settings_view.dart';
 import '../../archive/view/archive_view.dart';
 
-/// Simplified & fixed ChatListView
+/// Simplified & fixed ChatListView (with bottom-sheet confirmations)
 class ChatListView extends StatefulWidget {
   const ChatListView({super.key});
 
@@ -87,27 +87,74 @@ class _ChatListViewState extends State<ChatListView> {
     });
   }
 
-  // archive / delete
-  Future<bool?> _confirmDialog({required String title, required String message, bool destructive = false}) {
-    return showDialog<bool>(
+  // bottom-sheet confirmation helper (replaces AlertDialog)
+  Future<bool?> _showConfirmSheet({required String title, required String message, bool destructive = false}) {
+    return showModalBottomSheet<bool>(
       context: context,
-      builder: (_) => AlertDialog(
-        title: Text(title),
-        content: Text(message),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: Text('Confirm', style: TextStyle(color: destructive ? Colors.red : const Color(0xFF4F46E5))),
-          ),
-        ],
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
+      backgroundColor: Colors.white,
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Grab handle
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                Text(message, style: const TextStyle(fontSize: 14, color: Colors.black87)),
+                const SizedBox(height: 18),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.of(ctx).pop(false),
+                        style: OutlinedButton.styleFrom(
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          side: BorderSide(color: Colors.grey.shade300),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                        child: const Text('Cancel', style: TextStyle(color: Colors.black87)),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () => Navigator.of(ctx).pop(true),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: destructive ? Colors.red : const Color(0xFF4F46E5),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                        child: Text(destructive ? 'Delete' : 'Confirm', style: const TextStyle(color: Colors.white)),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
+  // archive / delete (now using bottom sheet)
   Future<void> _archiveSelected() async {
     if (_selectedChats.isEmpty) return;
-    final ok = await _confirmDialog(
+    final ok = await _showConfirmSheet(
       title: _selectedChats.length > 1 ? 'Archive ${_selectedChats.length} chats?' : 'Archive chat?',
       message: 'Selected chats will be moved to archive.',
     );
@@ -125,7 +172,7 @@ class _ChatListViewState extends State<ChatListView> {
   }
 
   Future<void> _archiveSingle(_DummyChat chat) async {
-    final ok = await _confirmDialog(title: 'Archive chat?', message: 'Move "${chat.name}" to archive?');
+    final ok = await _showConfirmSheet(title: 'Archive chat?', message: 'Move "${chat.name}" to archive?');
     if (ok == true) {
       setState(() {
         if (!_archivedChats.contains(chat)) _archivedChats.add(chat);
@@ -139,7 +186,7 @@ class _ChatListViewState extends State<ChatListView> {
 
   Future<void> _deleteSelected() async {
     if (_selectedChats.isEmpty) return;
-    final ok = await _confirmDialog(
+    final ok = await _showConfirmSheet(
       title: 'Delete ${_selectedChats.length} chats?',
       message: 'This will remove selected chats locally.',
       destructive: true,
@@ -158,7 +205,11 @@ class _ChatListViewState extends State<ChatListView> {
   }
 
   Future<void> _deleteSingle(_DummyChat chat) async {
-    final ok = await _confirmDialog(title: 'Delete chat?', message: 'Delete chat with ${chat.name}?', destructive: true);
+    final ok = await _showConfirmSheet(
+      title: 'Delete chat?',
+      message: 'Delete chat with ${chat.name}?',
+      destructive: true,
+    );
     if (ok == true) {
       setState(() {
         _pinnedChats.remove(chat);
