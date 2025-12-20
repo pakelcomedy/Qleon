@@ -103,33 +103,74 @@ class SettingsView extends StatelessWidget {
     );
   }
 
-  void _confirmLogout(BuildContext context) {
-    showDialog(
+  Future<void> _confirmLogout(BuildContext context) async {
+    final ok = await showModalBottomSheet<bool>(
       context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Log out?'),
-        content: const Text(
-          'You will need to sign in again to access your messages.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              // TODO: clear session / token / secure storage
-              // TODO: navigate to auth screen
-            },
-            child: const Text(
-              'Log out',
-              style: TextStyle(color: Colors.red),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      backgroundColor: Colors.white,
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // grab handle
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text('Log out?', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                const Text(
+                  'You will need to sign in again to access your messages.',
+                  style: TextStyle(fontSize: 14, color: Color(0xFF111827)),
+                ),
+                const SizedBox(height: 18),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.of(ctx).pop(false),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          side: BorderSide(color: Colors.grey.shade300),
+                        ),
+                        child: const Text('Cancel', style: TextStyle(color: Color(0xFF111827))),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () => Navigator.of(ctx).pop(true),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.red,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        ),
+                        child: const Text('Log out', style: TextStyle(color: Colors.white)),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ),
           ),
-        ],
-      ),
+        );
+      },
     );
+
+    if (ok == true) {
+      // TODO: clear session / token / secure storage
+      // TODO: navigate to auth screen
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Logged out (placeholder)')));
+    }
   }
 }
 
