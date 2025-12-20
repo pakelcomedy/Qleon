@@ -37,22 +37,80 @@ class _CallHistoryViewState extends State<CallHistoryView> {
         .toList();
   }
 
-  void _clearAllHistory() async {
-    final ok = await showDialog<bool>(
+  // Reusable bottom-sheet confirm helper
+  Future<bool?> _showConfirmSheet({
+    required String title,
+    required String message,
+    bool destructive = false,
+    String primaryLabel = 'Confirm',
+  }) {
+    return showModalBottomSheet<bool>(
       context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Clear call history?'),
-        content: const Text('All call history will be removed locally.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel')),
-          TextButton(
-              onPressed: () => Navigator.pop(context, true),
-              child:
-                  const Text('Clear', style: TextStyle(color: Colors.red))),
-        ],
-      ),
+      shape:
+          const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(14))),
+      backgroundColor: Colors.white,
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // grab handle
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                Text(message, style: const TextStyle(fontSize: 14, color: Color(0xFF111827))),
+                const SizedBox(height: 18),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.of(ctx).pop(false),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          side: BorderSide(color: Colors.grey.shade300),
+                        ),
+                        child: const Text('Cancel', style: TextStyle(color: Color(0xFF111827))),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () => Navigator.of(ctx).pop(true),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: destructive ? Colors.red : const Color(0xFF4F46E5),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        ),
+                        child: Text(primaryLabel, style: const TextStyle(color: Colors.white)),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _clearAllHistory() async {
+    final ok = await _showConfirmSheet(
+      title: 'Clear call history?',
+      message: 'All call history will be removed locally.',
+      destructive: true,
+      primaryLabel: 'Clear',
     );
 
     if (ok == true) {
@@ -64,21 +122,11 @@ class _CallHistoryViewState extends State<CallHistoryView> {
   }
 
   Future<bool> _confirmDelete(_DummyCall call) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Delete call?'),
-        content: Text('Delete call with ${call.displayName}?'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel')),
-          TextButton(
-              onPressed: () => Navigator.pop(context, true),
-              child:
-                  const Text('Delete', style: TextStyle(color: Colors.red))),
-        ],
-      ),
+    final ok = await _showConfirmSheet(
+      title: 'Delete call?',
+      message: 'Delete call with ${call.displayName}?',
+      destructive: true,
+      primaryLabel: 'Delete',
     );
     return ok == true;
   }

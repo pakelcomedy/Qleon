@@ -233,10 +233,6 @@ class _ActionTile extends StatelessWidget {
   }
 }
 
-/// =======================================================
-/// BOTTOM-SHEET DIALOGS (replaces AlertDialog)
-/// =======================================================
-
 Future<void> _showRenameSheet(BuildContext context, String currentName) async {
   final controller = TextEditingController(text: currentName);
 

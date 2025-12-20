@@ -349,10 +349,6 @@ class ExitGroupSection extends StatelessWidget {
   }
 }
 
-/// =============================================================
-/// BOTTOM-SHEET DIALOGS (replaces AlertDialog)
-/// =============================================================
-
 Future<void> showRenameSheet(BuildContext context, String currentName) async {
   final controller = TextEditingController(text: currentName);
 

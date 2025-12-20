@@ -87,7 +87,6 @@ class _ChatListViewState extends State<ChatListView> {
     });
   }
 
-  // bottom-sheet confirmation helper (replaces AlertDialog)
   Future<bool?> _showConfirmSheet({required String title, required String message, bool destructive = false}) {
     return showModalBottomSheet<bool>(
       context: context,
