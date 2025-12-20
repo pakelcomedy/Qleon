@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../features/chat/view/chat_list_view.dart';
 import '../features/call/view/call_history_view.dart';
 
@@ -11,6 +12,7 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> {
   int _currentIndex = 0;
+  DateTime? _lastBackPressed;
 
   final List<Widget> _pages = const [
     ChatListView(),
@@ -19,11 +21,44 @@ class _AppShellState extends State<AppShell> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF7F8FA),
-      body: SafeArea(child: _pages[_currentIndex]),
-      bottomNavigationBar: _buildBottomNavBar(),
+    return WillPopScope(
+      onWillPop: _onBackPressed,
+      child: Scaffold(
+        backgroundColor: const Color(0xFFF7F8FA),
+        body: SafeArea(child: _pages[_currentIndex]),
+        bottomNavigationBar: _buildBottomNavBar(),
+      ),
     );
+  }
+
+  Future<bool> _onBackPressed() async {
+    // 🔹 Jika bukan tab pertama, balik ke tab chat dulu
+    if (_currentIndex != 0) {
+      setState(() => _currentIndex = 0);
+      return false;
+    }
+
+    final now = DateTime.now();
+
+    if (_lastBackPressed == null ||
+        now.difference(_lastBackPressed!) > const Duration(seconds: 2)) {
+      _lastBackPressed = now;
+
+      HapticFeedback.lightImpact();
+
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('Press back again to exit'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+
+      return false; // ⛔ Jangan keluar dulu
+    }
+
+    return true; // ✅ Exit app
   }
 
   /// =============================================================
