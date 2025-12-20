@@ -29,7 +29,7 @@ class ChatListView extends StatelessWidget {
                       MaterialPageRoute(
                         builder: (_) => ChatRoomView(
                           title: chat.name,
-                          avatarUrl: chat.avatarUrl,
+                          isGroup: chat.isGroup,
                         ),
                       ),
                     );
@@ -70,28 +70,23 @@ class ChatListView extends StatelessWidget {
         ),
       ),
       actions: [
-        IconButton(
-          icon: const Icon(Icons.search, color: Color(0xFF374151)),
-          onPressed: () {},
-        ),
         PopupMenuButton<_MenuAction>(
           icon: const Icon(Icons.more_vert, color: Color(0xFF374151)),
           onSelected: (value) {
             switch (value) {
-              case _MenuAction.settings:
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => const SettingsView(),
-                  ),
-                );
-                break;
-
               case _MenuAction.archived:
                 Navigator.push(
                   context,
                   MaterialPageRoute(
                     builder: (_) => const ArchiveView(),
+                  ),
+                );
+                break;
+              case _MenuAction.settings:
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const SettingsView(),
                   ),
                 );
                 break;
@@ -161,7 +156,7 @@ class _ChatCard extends StatelessWidget {
       onTap: onTap,
       child: Container(
         margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(18),
@@ -175,8 +170,8 @@ class _ChatCard extends StatelessWidget {
         ),
         child: Row(
           children: [
-            _Avatar(chat: chat),
-            const SizedBox(width: 12),
+            _IdentityIndicator(chat: chat),
+            const SizedBox(width: 14),
             Expanded(child: _ChatInfo(chat: chat)),
             _ChatMeta(chat: chat),
           ],
@@ -186,35 +181,40 @@ class _ChatCard extends StatelessWidget {
   }
 }
 
-class _Avatar extends StatelessWidget {
+/// =============================================================
+/// IDENTITY INDICATOR (NO AVATAR)
+/// =============================================================
+class _IdentityIndicator extends StatelessWidget {
   final _DummyChat chat;
-  const _Avatar({required this.chat});
+  const _IdentityIndicator({required this.chat});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(2),
+      width: 44,
+      height: 44,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        gradient: chat.unreadCount > 0
-            ? const LinearGradient(
-                colors: [Color(0xFF6366F1), Color(0xFF4F46E5)],
-              )
-            : null,
+        color: chat.unreadCount > 0
+            ? const Color(0xFFEEF2FF)
+            : const Color(0xFFE5E7EB),
       ),
-      child: CircleAvatar(
-        radius: 26,
-        backgroundColor: const Color(0xFFE5E7EB),
-        backgroundImage:
-            chat.isGroup ? null : NetworkImage(chat.avatarUrl),
-        child: chat.isGroup
-            ? const Icon(Icons.group, color: Colors.grey)
-            : null,
+      child: Center(
+        child: Icon(
+          chat.isGroup ? Icons.groups : Icons.person_outline,
+          color: chat.unreadCount > 0
+              ? const Color(0xFF4F46E5)
+              : Colors.grey,
+          size: 22,
+        ),
       ),
     );
   }
 }
 
+/// =============================================================
+/// CHAT INFO
+/// =============================================================
 class _ChatInfo extends StatelessWidget {
   final _DummyChat chat;
   const _ChatInfo({required this.chat});
@@ -229,6 +229,7 @@ class _ChatInfo extends StatelessWidget {
           style: const TextStyle(
             fontWeight: FontWeight.w600,
             fontSize: 15,
+            color: Color(0xFF111827),
           ),
           overflow: TextOverflow.ellipsis,
         ),
@@ -237,13 +238,19 @@ class _ChatInfo extends StatelessWidget {
           chat.lastMessage,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: const TextStyle(color: Colors.grey),
+          style: const TextStyle(
+            fontSize: 13,
+            color: Color(0xFF6B7280),
+          ),
         ),
       ],
     );
   }
 }
 
+/// =============================================================
+/// CHAT META
+/// =============================================================
 class _ChatMeta extends StatelessWidget {
   final _DummyChat chat;
   const _ChatMeta({required this.chat});
@@ -255,16 +262,17 @@ class _ChatMeta extends StatelessWidget {
       children: [
         Text(
           chat.time,
-          style: const TextStyle(fontSize: 12, color: Colors.grey),
+          style: const TextStyle(
+            fontSize: 12,
+            color: Color(0xFF9CA3AF),
+          ),
         ),
         const SizedBox(height: 6),
         if (chat.unreadCount > 0)
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [Color(0xFF6366F1), Color(0xFF4F46E5)],
-              ),
+              color: const Color(0xFF4F46E5),
               borderRadius: BorderRadius.circular(12),
             ),
             child: Text(
@@ -287,15 +295,13 @@ class _ChatMeta extends StatelessWidget {
 enum _MenuAction { settings, archived }
 
 class _DummyChat {
-  final String avatarUrl;
   final String name;
   final String lastMessage;
   final String time;
   final int unreadCount;
   final bool isGroup;
 
-  _DummyChat({
-    required this.avatarUrl,
+  const _DummyChat({
     required this.name,
     required this.lastMessage,
     required this.time,
@@ -305,11 +311,10 @@ class _DummyChat {
 }
 
 /// =============================================================
-/// DUMMY DATA (INDIVIDU + GRUP)
+/// DUMMY DATA
 /// =============================================================
-final dummyChats = [
+const dummyChats = [
   _DummyChat(
-    avatarUrl: 'https://i.pravatar.cc/150?img=11',
     name: 'Andi Wijaya',
     lastMessage: 'File sudah aku upload ke drive',
     time: '22:10',
@@ -317,7 +322,6 @@ final dummyChats = [
     isGroup: false,
   ),
   _DummyChat(
-    avatarUrl: '',
     name: 'Tim Qleon',
     lastMessage: 'Standup besok jam 9 pagi',
     time: '20:40',
@@ -325,7 +329,6 @@ final dummyChats = [
     isGroup: true,
   ),
   _DummyChat(
-    avatarUrl: '',
     name: 'Flutter Study Group',
     lastMessage: 'Pull request sudah di-merge',
     time: '19:15',
@@ -333,7 +336,6 @@ final dummyChats = [
     isGroup: true,
   ),
   _DummyChat(
-    avatarUrl: 'https://i.pravatar.cc/150?img=7',
     name: 'Dosen PA',
     lastMessage: 'Revisi proposal minggu depan',
     time: '18:05',

@@ -26,7 +26,7 @@ dependencies:
   # 🧠 State Management & DI
   flutter_riverpod: ^2.5.1
   get_it: ^8.0.3
-  
+
   # 🌐 Connectivity
   connectivity_plus: ^6.1.0
 
@@ -35,12 +35,25 @@ dependencies:
   intl: ^0.18.0
   mobile_scanner: ^5.0.0
   qr_flutter: ^4.1.0
+  flutter_launcher_icons: ^0.13.1
+  image_picker: ^1.1.1
+  animations: ^2.0.6
+  shimmer: ^3.0.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
 
   flutter_lints: ^5.0.0
+  build_runner: ^2.5.0
+  json_serializable: ^6.6.1
 
 flutter:
   uses-material-design: true
+
+flutter_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon.png"
+  adaptive_icon_background: "#ffffff"
+  adaptive_icon_foreground: "assets/icon.png"

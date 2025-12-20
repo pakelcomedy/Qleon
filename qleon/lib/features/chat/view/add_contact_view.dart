@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:image_picker/image_picker.dart';
 
 class AddContactView extends StatefulWidget {
   const AddContactView({super.key});
@@ -37,11 +38,11 @@ class _AddContactViewState extends State<AddContactView> {
           ),
 
           /// SCAN FRAME
-          _ScanOverlay(),
+          const _ScanOverlay(),
 
           /// INFO TEXT
           Positioned(
-            bottom: 40,
+            bottom: 80,
             left: 0,
             right: 0,
             child: Column(
@@ -58,15 +59,23 @@ class _AddContactViewState extends State<AddContactView> {
               ],
             ),
           ),
+
+          /// BUTTON GALERI
+          Positioned(
+            bottom: 20,
+            right: 20,
+            child: FloatingActionButton(
+              backgroundColor: Colors.white,
+              onPressed: _pickImageFromGallery,
+              child: const Icon(Icons.photo, color: Colors.black),
+            ),
+          ),
         ],
       ),
     );
   }
 
   void _handleQrResult(BuildContext context, String data) {
-    /// CONTOH FORMAT QR:
-    /// qleon://user/USER_ID_123
-
     if (!data.startsWith('qleon://user/')) {
       _showError(context);
       return;
@@ -96,12 +105,28 @@ class _AddContactViewState extends State<AddContactView> {
       setState(() => _isScanned = false);
     });
   }
+
+  /// =============================================================
+  /// PICK IMAGE FROM GALLERY
+  /// =============================================================
+  Future<void> _pickImageFromGallery() async {
+    final ImagePicker picker = ImagePicker();
+    final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+    if (image == null) return;
+
+    // TODO: proses QR dari image
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Selected image from gallery')),
+    );
+  }
 }
 
 /// =============================================================
 /// SCAN OVERLAY UI
 /// =============================================================
 class _ScanOverlay extends StatelessWidget {
+  const _ScanOverlay({super.key});
+
   @override
   Widget build(BuildContext context) {
     return Center(

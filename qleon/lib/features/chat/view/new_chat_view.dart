@@ -3,7 +3,6 @@ import 'chat_room_view.dart';
 import 'add_contact_view.dart';
 import '../../group/view/create_group_view.dart';
 
-
 class NewChatView extends StatelessWidget {
   const NewChatView({super.key});
 
@@ -29,8 +28,8 @@ class NewChatView extends StatelessWidget {
                       context,
                       MaterialPageRoute(
                         builder: (_) => ChatRoomView(
-                          title: contact.name,
-                          avatarUrl: contact.avatarUrl,
+                          title: contact.displayName,
+                          isGroup: false,
                         ),
                       ),
                     );
@@ -44,6 +43,9 @@ class NewChatView extends StatelessWidget {
     );
   }
 
+  /// =============================================================
+  /// APP BAR
+  /// =============================================================
   AppBar _buildAppBar(BuildContext context) {
     return AppBar(
       backgroundColor: Colors.white,
@@ -63,7 +65,7 @@ class NewChatView extends StatelessWidget {
   }
 
   /// =============================================================
-  /// ACTION SECTION (NEW GROUP / ADD CONTACT)
+  /// ACTION SECTION
   /// =============================================================
   Widget _buildActionSection(BuildContext context) {
     return Padding(
@@ -73,6 +75,7 @@ class NewChatView extends StatelessWidget {
           _ActionTile(
             icon: Icons.group_add,
             title: 'New Group',
+            subtitle: 'Create a secure group',
             onTap: () {
               Navigator.push(
                 context,
@@ -84,8 +87,9 @@ class NewChatView extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           _ActionTile(
-            icon: Icons.person_add,
+            icon: Icons.qr_code_scanner,
             title: 'Add New Contact',
+            subtitle: 'Scan public identity',
             onTap: () {
               Navigator.push(
                 context,
@@ -137,11 +141,13 @@ class NewChatView extends StatelessWidget {
 class _ActionTile extends StatelessWidget {
   final IconData icon;
   final String title;
+  final String subtitle;
   final VoidCallback onTap;
 
   const _ActionTile({
     required this.icon,
     required this.title,
+    required this.subtitle,
     required this.onTap,
   });
 
@@ -163,18 +169,35 @@ class _ActionTile extends StatelessWidget {
         ),
         child: Row(
           children: [
-            CircleAvatar(
-              radius: 22,
-              backgroundColor: const Color(0xFFEEF2FF),
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: const Color(0xFFEEF2FF),
+              ),
               child: Icon(icon, color: const Color(0xFF4F46E5)),
             ),
             const SizedBox(width: 14),
-            Text(
-              title,
-              style: const TextStyle(
-                fontWeight: FontWeight.w600,
-                fontSize: 15,
-              ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 15,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF6B7280),
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -184,8 +207,8 @@ class _ActionTile extends StatelessWidget {
 }
 
 /// =============================================================
-/// CONTACT CARD
-/// =============================================================
+/// CONTACT CARD (NO AVATAR)
+// =============================================================
 class _ContactCard extends StatelessWidget {
   final _DummyContact contact;
   final VoidCallback onTap;
@@ -201,7 +224,7 @@ class _ContactCard extends StatelessWidget {
       onTap: onTap,
       child: Container(
         margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(18),
@@ -215,27 +238,28 @@ class _ContactCard extends StatelessWidget {
         ),
         child: Row(
           children: [
-            CircleAvatar(
-              radius: 26,
-              backgroundImage: NetworkImage(contact.avatarUrl),
-            ),
-            const SizedBox(width: 12),
+            _IdentityIndicator(contact: contact),
+            const SizedBox(width: 14),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    contact.name,
+                    contact.displayName,
                     style: const TextStyle(
                       fontWeight: FontWeight.w600,
                       fontSize: 15,
+                      color: Color(0xFF111827),
                     ),
                     overflow: TextOverflow.ellipsis,
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    contact.status,
-                    style: const TextStyle(color: Colors.grey),
+                    contact.publicStatus,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: Color(0xFF6B7280),
+                    ),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ],
@@ -249,39 +273,76 @@ class _ContactCard extends StatelessWidget {
 }
 
 /// =============================================================
-/// DUMMY DATA
+/// IDENTITY INDICATOR
+/// =============================================================
+class _IdentityIndicator extends StatelessWidget {
+  final _DummyContact contact;
+  const _IdentityIndicator({required this.contact});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 44,
+      height: 44,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: contact.isOnline
+            ? const Color(0xFFEEF2FF)
+            : const Color(0xFFE5E7EB),
+      ),
+      child: Icon(
+        Icons.person_outline,
+        color: contact.isOnline
+            ? const Color(0xFF4F46E5)
+            : Colors.grey,
+      ),
+    );
+  }
+}
+
+/// =============================================================
+/// DUMMY MODEL
 /// =============================================================
 class _DummyContact {
-  final String avatarUrl;
-  final String name;
-  final String status;
+  final String publicId;        // hasil QR / public identity
+  final String displayName;     // local alias
+  final String publicStatus;
+  final bool isOnline;
 
-  _DummyContact({
-    required this.avatarUrl,
-    required this.name,
-    required this.status,
+  const _DummyContact({
+    required this.publicId,
+    required this.displayName,
+    required this.publicStatus,
+    required this.isOnline,
   });
 }
 
-final dummyContacts = [
+/// =============================================================
+/// DUMMY DATA
+/// =============================================================
+const dummyContacts = [
   _DummyContact(
-    avatarUrl: 'https://i.pravatar.cc/150?img=41',
-    name: 'Andi Wijaya',
-    status: 'Online',
+    publicId: '0xA91F23D9',
+    displayName: 'Andi Wijaya',
+    publicStatus: 'Online',
+    isOnline: true,
   ),
   _DummyContact(
-    avatarUrl: 'https://i.pravatar.cc/150?img=12',
-    name: 'Budi Santoso',
-    status: 'Last seen 5 min ago',
+    publicId: '0x77BC119A',
+    displayName: 'Budi Santoso',
+    publicStatus: 'Last seen 5 min ago',
+    isOnline: false,
   ),
   _DummyContact(
-    avatarUrl: 'https://i.pravatar.cc/150?img=27',
-    name: 'Citra Lestari',
-    status: 'Busy',
+    publicId: '0xFE19C442',
+    displayName: 'Citra Lestari',
+    publicStatus: 'Busy',
+    isOnline: false,
   ),
   _DummyContact(
-    avatarUrl: 'https://i.pravatar.cc/150?img=6',
-    name: 'Dosen PA',
-    status: 'Available',
+    publicId: '0x0021AA90',
+    displayName: 'Dosen PA',
+    publicStatus: 'Available',
+    isOnline: true,
   ),
 ];

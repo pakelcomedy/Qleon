@@ -11,7 +11,7 @@ class QleonApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Qleon Chat',
+      title: 'Qleon',
       debugShowCheckedModeBanner: false,
       initialRoute: AppRoutes.shell,
       routes: AppRoutes.routes,
