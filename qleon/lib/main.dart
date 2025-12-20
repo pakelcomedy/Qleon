@@ -3,6 +3,9 @@ import 'package:firebase_core/firebase_core.dart';
 
 import 'app/app_routes.dart';
 import 'di/locator.dart';
+import 'features/auth/view/login_view.dart';
+import 'app/app_shell.dart';
+import 'features/auth/viewmodel/auth_viewmodel.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,7 +32,8 @@ class QleonApp extends StatelessWidget {
     return MaterialApp(
       title: 'Qleon',
       debugShowCheckedModeBanner: false,
-      initialRoute: AppRoutes.splash,
+      // Use AuthGate as home so we can decide initial screen based on auth state
+      home: const AuthGate(),
       routes: AppRoutes.routes,
       theme: ThemeData(
         useMaterial3: true,
@@ -41,6 +45,37 @@ class QleonApp extends StatelessWidget {
           elevation: 0,
         ),
       ),
+    );
+  }
+}
+
+/// AuthGate listens to FirebaseAuth state and returns appropriate screen.
+/// - if user != null -> AppShell (main app)
+/// - else -> LoginView
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder(
+      // Listen to auth state changes so session persistence works automatically
+      stream: AuthViewModel.firebaseAuth.authStateChanges(),
+      builder: (context, snapshot) {
+        // waiting for the first event -> show a simple splash/loader
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+
+        // if user is signed in, show main app
+        if (snapshot.hasData && snapshot.data != null) {
+          return const AppShell();
+        }
+
+        // otherwise show login
+        return const LoginView();
+      },
     );
   }
 }

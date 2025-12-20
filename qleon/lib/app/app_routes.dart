@@ -8,8 +8,8 @@ import '../features/auth/view/forgot_password_view.dart';
 import '../app/app_shell.dart';
 
 class AppRoutes {
-  // ROOT
-  static const splash = '/';
+  // ROOT (tidak memakai '/' untuk menghindari konflik dengan `home`)
+  static const splash = '/splash';
 
   // AUTH
   static const onboarding = '/onboarding';
@@ -21,6 +21,7 @@ class AppRoutes {
   static const shell = '/app';
 
   static final Map<String, WidgetBuilder> routes = {
+    // gunakan '/splash' bukan '/'
     splash: (_) => const SplashView(),
 
     onboarding: (_) => const OnboardingView(),

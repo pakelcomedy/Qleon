@@ -17,6 +17,7 @@ dependencies:
   cloud_firestore: ^5.6.0
   firebase_storage: ^12.4.0
   firebase_messaging: ^15.2.0
+  shared_preferences: ^2.0.15
 
   # 🔐 Security & Encryption
   flutter_secure_storage: ^9.2.2

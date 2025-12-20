@@ -4,6 +4,9 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 class AuthViewModel extends ChangeNotifier {
+  // Expose a static FirebaseAuth instance so other parts (AuthGate) can reuse it
+  static FirebaseAuth get firebaseAuth => FirebaseAuth.instance;
+
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
 
@@ -15,7 +18,7 @@ class AuthViewModel extends ChangeNotifier {
   bool isPasswordResetSuccess = false;
   String? errorMessage;
 
-  final _auth = FirebaseAuth.instance;
+  final _auth = firebaseAuth;
   final _firestore = FirebaseFirestore.instance;
 
   String _generateAutoName() {
@@ -23,6 +26,21 @@ class AuthViewModel extends ChangeNotifier {
     final rand = Random.secure();
     return '0x' +
         List.generate(8, (_) => chars[rand.nextInt(chars.length)]).join();
+  }
+
+  /// Convenience getter to check immediately if user is logged in
+  bool get isLoggedIn => _auth.currentUser != null;
+
+  /// Logout: sign out from Firebase
+  Future<void> logout() async {
+    try {
+      await _auth.signOut();
+      debugPrint('USER LOGOUT SUCCESS');
+    } catch (e) {
+      debugPrint('LOGOUT ERROR: $e');
+      errorMessage = 'Gagal logout. Coba lagi.';
+      notifyListeners();
+    }
   }
 
   /// Register user. VM does NOT navigate or show UI.
