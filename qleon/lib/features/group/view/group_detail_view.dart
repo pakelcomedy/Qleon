@@ -113,7 +113,7 @@ class GroupIdentitySection extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           TextButton(
-            onPressed: () => showRenameDialog(context, groupName),
+            onPressed: () => showRenameSheet(context, groupName),
             child: const Text('Edit group name', style: TextStyle(color: Color(0xFF4F46E5))),
           ),
         ],
@@ -342,7 +342,7 @@ class ExitGroupSection extends StatelessWidget {
       child: ListTile(
         leading: const Icon(Icons.logout, color: Colors.red),
         title: const Text('Exit group', style: TextStyle(color: Colors.red, fontWeight: FontWeight.w600)),
-        onTap: () => confirmDialog(context,
+        onTap: () => showConfirmSheet(context,
             title: 'Exit group?', message: 'You will no longer receive messages from this group.'),
       ),
     );
@@ -350,26 +350,172 @@ class ExitGroupSection extends StatelessWidget {
 }
 
 /// =============================================================
-/// DIALOGS
+/// BOTTOM-SHEET DIALOGS (replaces AlertDialog)
 /// =============================================================
-void showRenameDialog(BuildContext context, String currentName) {
+
+Future<void> showRenameSheet(BuildContext context, String currentName) async {
   final controller = TextEditingController(text: currentName);
 
-  showDialog(
+  final result = await showModalBottomSheet<bool>(
     context: context,
-    builder: (_) => AlertDialog(
-      title: const Text('Edit group name'),
-      content: TextField(controller: controller, decoration: const InputDecoration(hintText: 'Enter new name')),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-        TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Save', style: TextStyle(color: Color(0xFF4F46E5), fontWeight: FontWeight.bold))),
-      ],
-    ),
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+    backgroundColor: Colors.white,
+    builder: (ctx) {
+      return Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(ctx).viewInsets.bottom,
+          left: 20,
+          right: 20,
+          top: 16,
+        ),
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Handle
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text('Edit group name', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  hintText: 'Enter new name',
+                  border: OutlineInputBorder(borderSide: BorderSide.none),
+                  filled: true,
+                  fillColor: Color(0xFFF3F4F6),
+                  contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(ctx).pop(false),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        side: BorderSide(color: Colors.grey.shade300),
+                      ),
+                      child: const Text('Cancel', style: TextStyle(color: Color(0xFF111827))),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.of(ctx).pop(true),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF4F46E5),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      child: const Text('Save', style: TextStyle(color: Colors.white)),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+            ],
+          ),
+        ),
+      );
+    },
   );
+
+  // read value and cleanup
+  final newName = controller.text.trim();
+  controller.dispose();
+  if (result == true && newName.isNotEmpty) {
+    // TODO: persist group rename
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Group renamed to "$newName" (placeholder)')));
+  }
 }
 
+Future<void> showConfirmSheet(
+  BuildContext context, {
+  required String title,
+  required String message,
+  bool destructive = true,
+  String primaryLabel = 'Confirm',
+}) async {
+  final ok = await showModalBottomSheet<bool>(
+    context: context,
+    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+    backgroundColor: Colors.white,
+    builder: (ctx) {
+      return SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // handle
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              Text(message, style: const TextStyle(fontSize: 14, color: Color(0xFF111827))),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(ctx).pop(false),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        side: BorderSide(color: Colors.grey.shade300),
+                      ),
+                      child: const Text('Cancel', style: TextStyle(color: Color(0xFF111827))),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.of(ctx).pop(true),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: destructive ? Colors.red : const Color(0xFF4F46E5),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      child: Text(primaryLabel, style: const TextStyle(color: Colors.white)),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+
+  if (ok == true) {
+    // TODO: implement actual action (remove, make admin, exit, etc.)
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Action confirmed (placeholder)')));
+  }
+}
+
+/// =============================================================
+/// MEMBER ACTIONS
+/// =============================================================
 void handleMemberAction(BuildContext context, String action, GroupMember member) {
   final title = switch (action) {
     'make_admin' => 'Make admin?',
@@ -383,23 +529,7 @@ void handleMemberAction(BuildContext context, String action, GroupMember member)
     _ => '${member.displayName} will be removed from this group.',
   };
 
-  confirmDialog(context, title: title, message: message);
-}
-
-void confirmDialog(BuildContext context, {required String title, required String message}) {
-  showDialog(
-    context: context,
-    builder: (_) => AlertDialog(
-      title: Text(title),
-      content: Text(message),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-        TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Confirm', style: TextStyle(color: Colors.red))),
-      ],
-    ),
-  );
+  showConfirmSheet(context, title: title, message: message);
 }
 
 /// =============================================================

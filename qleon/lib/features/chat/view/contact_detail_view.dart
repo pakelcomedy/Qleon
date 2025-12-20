@@ -76,7 +76,7 @@ class _AliasSection extends StatelessWidget {
         ),
         const SizedBox(height: 6),
         TextButton(
-          onPressed: () => _showRenameDialog(context, contactAlias),
+          onPressed: () => _showRenameSheet(context, contactAlias),
           child: const Text(
             'Edit local name',
             style: TextStyle(
@@ -179,8 +179,7 @@ class _ActionSection extends StatelessWidget {
           onTap: () => _confirmAction(
             context,
             title: 'Block contact?',
-            message:
-                'You will no longer receive messages or requests from this identity.',
+            message: 'You will no longer receive messages or requests from this identity.',
           ),
         ),
         _ActionTile(
@@ -190,8 +189,7 @@ class _ActionSection extends StatelessWidget {
           onTap: () => _confirmAction(
             context,
             title: 'Delete chat?',
-            message:
-                'All local messages in this conversation will be permanently removed.',
+            message: 'All local messages in this conversation will be permanently removed.',
           ),
         ),
       ],
@@ -236,70 +234,163 @@ class _ActionTile extends StatelessWidget {
 }
 
 /// =======================================================
-/// DIALOGS
+/// BOTTOM-SHEET DIALOGS (replaces AlertDialog)
 /// =======================================================
-void _showRenameDialog(BuildContext context, String currentName) {
+
+Future<void> _showRenameSheet(BuildContext context, String currentName) async {
   final controller = TextEditingController(text: currentName);
 
-  showDialog(
+  final result = await showModalBottomSheet<bool>(
     context: context,
-    builder: (_) => AlertDialog(
-      title: const Text('Edit local name'),
-      content: TextField(
-        controller: controller,
-        decoration: const InputDecoration(
-          hintText: 'Enter a new alias',
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+    backgroundColor: Colors.white,
+    builder: (ctx) {
+      return Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(ctx).viewInsets.bottom,
+          left: 20,
+          right: 20,
+          top: 16,
         ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        TextButton(
-          onPressed: () {
-            Navigator.pop(context);
-            // TODO: save alias locally (no server impact)
-          },
-          child: const Text(
-            'Save',
-            style: TextStyle(
-              color: Color(0xFF4F46E5),
-              fontWeight: FontWeight.bold,
-            ),
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Handle
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text('Edit local name', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  hintText: 'Enter a new alias',
+                  border: OutlineInputBorder(borderSide: BorderSide.none),
+                  filled: true,
+                  fillColor: Color(0xFFF3F4F6),
+                  contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(ctx).pop(false),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        side: BorderSide(color: Colors.grey.shade300),
+                      ),
+                      child: const Text('Cancel', style: TextStyle(color: Color(0xFF111827))),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.of(ctx).pop(true),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF4F46E5),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      child: const Text('Save', style: TextStyle(color: Colors.white)),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+            ],
           ),
         ),
-      ],
-    ),
+      );
+    },
   );
+
+  // cleanup and apply
+  controller.dispose();
+  if (result == true) {
+    final newAlias = controller.text.trim();
+    // TODO: save alias locally (no server impact)
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Saved "$newAlias" (placeholder)')));
+  }
 }
 
-void _confirmAction(
+Future<void> _confirmAction(
   BuildContext context, {
   required String title,
   required String message,
-}) {
-  showDialog(
+}) async {
+  final ok = await showModalBottomSheet<bool>(
     context: context,
-    builder: (_) => AlertDialog(
-      title: Text(title),
-      content: Text(message),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        TextButton(
-          onPressed: () {
-            Navigator.pop(context);
-            // TODO: implement block / delete logic
-          },
-          child: const Text(
-            'Confirm',
-            style: TextStyle(color: Colors.red),
+    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+    backgroundColor: Colors.white,
+    builder: (ctx) {
+      return SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // handle
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              Text(message, style: const TextStyle(fontSize: 14, color: Color(0xFF111827))),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(ctx).pop(false),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        side: BorderSide(color: Colors.grey.shade300),
+                      ),
+                      child: const Text('Cancel', style: TextStyle(color: Color(0xFF111827))),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.of(ctx).pop(true),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      child: const Text('Confirm', style: TextStyle(color: Colors.white)),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
-      ],
-    ),
+      );
+    },
   );
+
+  if (ok == true) {
+    // TODO: implement block / delete logic
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Action confirmed (placeholder)')));
+  }
 }

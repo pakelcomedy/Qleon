@@ -148,23 +148,79 @@ class _ChatRoomViewState extends State<ChatRoomView> {
     );
   }
 
-  Future<void> _showClearChatDialog() async {
-    final ok = await showDialog<bool>(
+  // Unified bottom-sheet confirmation helper
+  Future<bool?> _showConfirmSheet({
+    required String title,
+    required String message,
+    bool destructive = false,
+    String primaryLabel = 'Confirm',
+  }) {
+    return showModalBottomSheet<bool>(
       context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Clear chat?'),
-        content: const Text('All messages in this conversation will be deleted locally.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () {
-              // TODO: clear chat logic (local / remote)
-              Navigator.pop(context, true);
-            },
-            child: const Text('Clear', style: TextStyle(color: Colors.red)),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      backgroundColor: Colors.white,
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Grab handle
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                Text(message, style: const TextStyle(fontSize: 14, color: Colors.black87)),
+                const SizedBox(height: 18),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.of(ctx).pop(false),
+                        style: OutlinedButton.styleFrom(
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          side: BorderSide(color: Colors.grey.shade300),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                        child: const Text('Cancel', style: TextStyle(color: Colors.black87)),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () => Navigator.of(ctx).pop(true),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: destructive ? Colors.red : const Color(0xFF4F46E5),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                        child: Text(primaryLabel, style: const TextStyle(color: Colors.white)),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
-        ],
-      ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showClearChatDialog() async {
+    final ok = await _showConfirmSheet(
+      title: 'Clear chat?',
+      message: 'All messages in this conversation will be deleted locally.',
+      destructive: true,
+      primaryLabel: 'Clear',
     );
     if (ok == true) {
       setState(() {
@@ -175,19 +231,11 @@ class _ChatRoomViewState extends State<ChatRoomView> {
   }
 
   Future<void> _confirmCallAndNavigate() async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text('Call ${widget.title}?'),
-        content: const Text('Start a voice call to this contact/group?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Call', style: TextStyle(color: Color(0xFF4F46E5))),
-          ),
-        ],
-      ),
+    final ok = await _showConfirmSheet(
+      title: 'Call ${widget.title}?',
+      message: 'Start a voice call to this contact/group?',
+      destructive: false,
+      primaryLabel: 'Call',
     );
     if (ok == true) {
       Navigator.push(context, MaterialPageRoute(builder: (_) => const CallView()));
@@ -215,8 +263,7 @@ class _ChatRoomViewState extends State<ChatRoomView> {
               },
             ),
           ),
-          if (reply != null && !selectionMode)
-            ReplyPreview(message: reply, onCancel: _cancelReply),
+          if (reply != null && !selectionMode) ReplyPreview(message: reply, onCancel: _cancelReply),
           _buildInputBar(),
         ],
       ),
@@ -291,22 +338,11 @@ class _ChatRoomViewState extends State<ChatRoomView> {
 
   Future<void> _confirmDeleteSelected(BuildContext context) async {
     final count = _selected.length;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text(count == 1 ? 'Delete message?' : 'Delete $count messages?'),
-        content: Text(count == 1 ? 'Choose delete option' : 'This will delete the selected messages from your device.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () {
-              // TODO: perform delete locally / remotely as needed
-              Navigator.pop(context, true);
-            },
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
+    final ok = await _showConfirmSheet(
+      title: count == 1 ? 'Delete message?' : 'Delete $count messages?',
+      message: count == 1 ? 'Choose delete option' : 'This will delete the selected messages from your device.',
+      destructive: true,
+      primaryLabel: 'Delete',
     );
     if (ok == true) setState(() => _selected.clear());
   }
