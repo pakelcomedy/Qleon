@@ -1,4 +1,8 @@
+// new_chat_view.dart
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import '../viewmodel/new_chat_viewmodel.dart';
 import 'chat_room_view.dart';
 import 'add_contact_view.dart';
 import '../../group/view/create_group_view.dart';
@@ -8,6 +12,20 @@ class NewChatView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return ChangeNotifierProvider<NewChatViewModel>(
+      create: (_) => NewChatViewModel(),
+      child: const _NewChatBody(),
+    );
+  }
+}
+
+class _NewChatBody extends StatelessWidget {
+  const _NewChatBody({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final vm = context.watch<NewChatViewModel>();
+
     return Scaffold(
       backgroundColor: const Color(0xFFF7F8FA),
       appBar: _buildAppBar(context),
@@ -16,27 +34,31 @@ class NewChatView extends StatelessWidget {
           _buildActionSection(context),
           _buildSearchBar(),
           Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.all(12),
-              itemCount: dummyContacts.length,
-              itemBuilder: (context, index) {
-                final contact = dummyContacts[index];
-                return _ContactCard(
-                  contact: contact,
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => ChatRoomView(
-                          title: contact.displayName,
-                          isGroup: false,
-                        ),
+            child: vm.isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : vm.contacts.isEmpty
+                    ? _EmptyContactsPlaceholder()
+                    : ListView.builder(
+                        padding: const EdgeInsets.all(12),
+                        itemCount: vm.contacts.length,
+                        itemBuilder: (context, index) {
+                          final contact = vm.contacts[index];
+                          return _ContactCard(
+                            contact: contact,
+                            onTap: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => ChatRoomView(
+                                    title: contact.displayName,
+                                    isGroup: false,
+                                  ),
+                                ),
+                              );
+                            },
+                          );
+                        },
                       ),
-                    );
-                  },
-                );
-              },
-            ),
           ),
         ],
       ),
@@ -68,6 +90,8 @@ class NewChatView extends StatelessWidget {
   /// ACTION SECTION
   /// =============================================================
   Widget _buildActionSection(BuildContext context) {
+    final vm = context.read<NewChatViewModel>();
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
       child: Column(
@@ -90,13 +114,40 @@ class NewChatView extends StatelessWidget {
             icon: Icons.qr_code_scanner,
             title: 'Add New Contact',
             subtitle: 'Scan public identity',
-            onTap: () {
-              Navigator.push(
+            onTap: () async {
+              // Launch AddContactView and wait for the scanned contact
+              final result = await Navigator.push<dynamic>(
                 context,
-                MaterialPageRoute(
-                  builder: (_) => const AddContactView(),
-                ),
+                MaterialPageRoute(builder: (_) => const AddContactView()),
               );
+
+              // If AddContactView returns a ChatContact, save it and open chat
+              if (result is ChatContact) {
+                try {
+                  await vm.addContact(result);
+
+                  // immediately navigate to chat room
+                  if (context.mounted) {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => ChatRoomView(
+                          title: result.displayName,
+                          isGroup: false,
+
+                        ),
+                      ),
+                    );
+                  }
+                } catch (e) {
+                  // show snackbar on error
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Gagal menambahkan kontak: $e')),
+                    );
+                  }
+                }
+              }
             },
           ),
         ],
@@ -135,9 +186,6 @@ class NewChatView extends StatelessWidget {
   }
 }
 
-/// =============================================================
-/// ACTION TILE
-/// =============================================================
 class _ActionTile extends StatelessWidget {
   final IconData icon;
   final String title;
@@ -206,11 +254,9 @@ class _ActionTile extends StatelessWidget {
   }
 }
 
-/// =============================================================
-/// CONTACT CARD (NO AVATAR)
-// =============================================================
+/// Contact card that uses ChatContact model from viewmodel
 class _ContactCard extends StatelessWidget {
-  final _DummyContact contact;
+  final ChatContact contact;
   final VoidCallback onTap;
 
   const _ContactCard({
@@ -238,7 +284,7 @@ class _ContactCard extends StatelessWidget {
         ),
         child: Row(
           children: [
-            _IdentityIndicator(contact: contact),
+            _IdentityIndicator(isOnline: contact.isOnline),
             const SizedBox(width: 14),
             Expanded(
               child: Column(
@@ -272,12 +318,9 @@ class _ContactCard extends StatelessWidget {
   }
 }
 
-/// =============================================================
-/// IDENTITY INDICATOR
-/// =============================================================
 class _IdentityIndicator extends StatelessWidget {
-  final _DummyContact contact;
-  const _IdentityIndicator({required this.contact});
+  final bool isOnline;
+  const _IdentityIndicator({required this.isOnline});
 
   @override
   Widget build(BuildContext context) {
@@ -286,63 +329,24 @@ class _IdentityIndicator extends StatelessWidget {
       height: 44,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: contact.isOnline
-            ? const Color(0xFFEEF2FF)
-            : const Color(0xFFE5E7EB),
+        color: isOnline ? const Color(0xFFEEF2FF) : const Color(0xFFE5E7EB),
       ),
       child: Icon(
         Icons.person_outline,
-        color: contact.isOnline
-            ? const Color(0xFF4F46E5)
-            : Colors.grey,
+        color: isOnline ? const Color(0xFF4F46E5) : Colors.grey,
       ),
     );
   }
 }
 
-/// =============================================================
-/// DUMMY MODEL
-/// =============================================================
-class _DummyContact {
-  final String publicId;        // hasil QR / public identity
-  final String displayName;     // local alias
-  final String publicStatus;
-  final bool isOnline;
-
-  const _DummyContact({
-    required this.publicId,
-    required this.displayName,
-    required this.publicStatus,
-    required this.isOnline,
-  });
+class _EmptyContactsPlaceholder extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Text(
+        'No contacts yet. Tap "Add New Contact" to scan and add.',
+        style: TextStyle(color: Colors.grey.shade600),
+      ),
+    );
+  }
 }
-
-/// =============================================================
-/// DUMMY DATA
-/// =============================================================
-const dummyContacts = [
-  _DummyContact(
-    publicId: '0xA91F23D9',
-    displayName: 'Andi Wijaya',
-    publicStatus: 'Online',
-    isOnline: true,
-  ),
-  _DummyContact(
-    publicId: '0x77BC119A',
-    displayName: 'Budi Santoso',
-    publicStatus: 'Last seen 5 min ago',
-    isOnline: false,
-  ),
-  _DummyContact(
-    publicId: '0xFE19C442',
-    displayName: 'Citra Lestari',
-    publicStatus: 'Busy',
-    isOnline: false,
-  ),
-  _DummyContact(
-    publicId: '0x0021AA90',
-    displayName: 'Dosen PA',
-    publicStatus: 'Available',
-    isOnline: true,
-  ),
-];
