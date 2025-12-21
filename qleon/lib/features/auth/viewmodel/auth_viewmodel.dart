@@ -4,7 +4,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 class AuthViewModel extends ChangeNotifier {
-  // Expose a static FirebaseAuth instance so other parts (AuthGate) can reuse it
   static FirebaseAuth get firebaseAuth => FirebaseAuth.instance;
 
   final emailController = TextEditingController();
@@ -12,7 +11,6 @@ class AuthViewModel extends ChangeNotifier {
 
   bool isLoading = false;
 
-  // registration / login / reset flags
   bool isRegisteredSuccess = false;
   bool isLoginSuccess = false;
   bool isPasswordResetSuccess = false;
@@ -28,26 +26,29 @@ class AuthViewModel extends ChangeNotifier {
         List.generate(8, (_) => chars[rand.nextInt(chars.length)]).join();
   }
 
-  /// Convenience getter to check immediately if user is logged in
   bool get isLoggedIn => _auth.currentUser != null;
 
-  /// Logout: sign out from Firebase
+  Future<User?> currentUser() async {
+    try {
+      await _auth.currentUser?.reload();
+    } catch (_) {}
+    return _auth.currentUser;
+  }
+
   Future<void> logout() async {
     try {
       await _auth.signOut();
-      debugPrint('USER LOGOUT SUCCESS');
+      debugPrint('[AuthVM] USER LOGOUT SUCCESS');
     } catch (e) {
-      debugPrint('LOGOUT ERROR: $e');
+      debugPrint('[AuthVM] LOGOUT ERROR: $e');
       errorMessage = 'Gagal logout. Coba lagi.';
       notifyListeners();
     }
   }
 
-  /// Register user. VM does NOT navigate or show UI.
   Future<void> register() async {
     final email = emailController.text.trim();
     final password = passwordController.text;
-
     if (email.isEmpty || password.isEmpty) {
       errorMessage = "Email atau password tidak boleh kosong";
       notifyListeners();
@@ -67,19 +68,32 @@ class AuthViewModel extends ChangeNotifier {
         password: password,
       );
 
-      final uid = credential.user!.uid;
+      final uid = credential.user?.uid;
+      debugPrint('[AuthVM] createUser returned uid=$uid');
 
-      await _firestore.collection("users").doc(uid).set({
-        "uid": uid,
-        "email": email,
-        "name": autoName,
-        "createdAt": FieldValue.serverTimestamp(),
-      });
+      if (uid != null) {
+        await _firestore.collection("users").doc(uid).set({
+          "uid": uid,
+          "email": email,
+          "name": autoName,
+          "createdAt": FieldValue.serverTimestamp(),
+        });
+      }
 
-      debugPrint('REGISTER SUCCESS: $autoName');
+      try {
+        await _auth.currentUser?.reload();
+        final u = _auth.currentUser;
+        final token = u != null ? await u.getIdToken() : null;
+        debugPrint('[AuthVM] after register current=${u?.uid} token=${token != null ? token.substring(0,20) + "..." : null}');
+      } catch (e) {
+        debugPrint('[AuthVM] reload/getIdToken after register failed: $e');
+      }
+
       isRegisteredSuccess = true;
+      isLoginSuccess = _auth.currentUser != null;
+      debugPrint('[AuthVM] REGISTER SUCCESS uid=${_auth.currentUser?.uid}');
     } on FirebaseAuthException catch (e) {
-      debugPrint('REGISTER ERROR: ${e.code}');
+      debugPrint('[AuthVM] REGISTER ERROR code=${e.code} message=${e.message}');
       switch (e.code) {
         case 'weak-password':
           errorMessage = 'Password terlalu lemah';
@@ -94,7 +108,7 @@ class AuthViewModel extends ChangeNotifier {
           errorMessage = 'Gagal mendaftar: ${e.message ?? e.code}';
       }
     } catch (e) {
-      debugPrint('REGISTER ERROR: $e');
+      debugPrint('[AuthVM] REGISTER ERROR: $e');
       errorMessage = 'Terjadi kesalahan. Coba lagi.';
     } finally {
       isLoading = false;
@@ -102,11 +116,9 @@ class AuthViewModel extends ChangeNotifier {
     }
   }
 
-  /// Login user. VM only updates state; View handles navigation/snackbars.
   Future<void> login() async {
     final email = emailController.text.trim();
     final password = passwordController.text;
-
     if (email.isEmpty || password.isEmpty) {
       errorMessage = "Email atau password tidak boleh kosong";
       notifyListeners();
@@ -124,11 +136,26 @@ class AuthViewModel extends ChangeNotifier {
         password: password,
       );
 
-      final uid = credential.user!.uid;
-      debugPrint('LOGIN SUCCESS: $uid');
-      isLoginSuccess = true;
+      final uid = credential.user?.uid;
+      debugPrint('[AuthVM] signIn returned uid=$uid');
+
+      try {
+        await _auth.currentUser?.reload();
+        final u = _auth.currentUser;
+        final token = u != null ? await u.getIdToken() : null;
+        debugPrint('[AuthVM] after login current=${u?.uid} token=${token != null ? token.substring(0,20) + "..." : null}');
+      } catch (e) {
+        debugPrint('[AuthVM] reload/getIdToken after login failed: $e');
+      }
+
+      isLoginSuccess = _auth.currentUser != null;
+      if (isLoginSuccess) {
+        debugPrint('[AuthVM] LOGIN SUCCESS uid=${_auth.currentUser?.uid}');
+      } else {
+        debugPrint('[AuthVM] LOGIN finished but currentUser is null');
+      }
     } on FirebaseAuthException catch (e) {
-      debugPrint('LOGIN ERROR: ${e.code}');
+      debugPrint('[AuthVM] LOGIN ERROR code=${e.code} message=${e.message}');
       switch (e.code) {
         case 'user-not-found':
           errorMessage = 'Pengguna tidak ditemukan';
@@ -146,7 +173,7 @@ class AuthViewModel extends ChangeNotifier {
           errorMessage = 'Gagal login: ${e.message ?? e.code}';
       }
     } catch (e) {
-      debugPrint('LOGIN ERROR: $e');
+      debugPrint('[AuthVM] LOGIN ERROR: $e');
       errorMessage = 'Terjadi kesalahan. Coba lagi.';
     } finally {
       isLoading = false;
@@ -154,10 +181,8 @@ class AuthViewModel extends ChangeNotifier {
     }
   }
 
-  /// Forgot password: kirim email reset
   Future<void> sendPasswordResetEmail() async {
     final email = emailController.text.trim();
-
     if (email.isEmpty) {
       errorMessage = "Masukkan email untuk menerima link reset";
       notifyListeners();
@@ -171,10 +196,10 @@ class AuthViewModel extends ChangeNotifier {
 
     try {
       await _auth.sendPasswordResetEmail(email: email);
-      debugPrint('PASSWORD RESET EMAIL SENT: $email');
+      debugPrint('[AuthVM] PASSWORD RESET EMAIL SENT: $email');
       isPasswordResetSuccess = true;
     } on FirebaseAuthException catch (e) {
-      debugPrint('PASSWORD RESET ERROR: ${e.code}');
+      debugPrint('[AuthVM] PASSWORD RESET ERROR code=${e.code} message=${e.message}');
       switch (e.code) {
         case 'user-not-found':
           errorMessage = 'Pengguna tidak ditemukan';
@@ -186,7 +211,7 @@ class AuthViewModel extends ChangeNotifier {
           errorMessage = 'Gagal mengirim link: ${e.message ?? e.code}';
       }
     } catch (e) {
-      debugPrint('PASSWORD RESET ERROR: $e');
+      debugPrint('[AuthVM] PASSWORD RESET ERROR: $e');
       errorMessage = 'Terjadi kesalahan. Coba lagi.';
     } finally {
       isLoading = false;
@@ -194,21 +219,18 @@ class AuthViewModel extends ChangeNotifier {
     }
   }
 
-  /// Reset registration flags after view handled navigation / snackbar.
   void resetRegistrationState() {
     isRegisteredSuccess = false;
     errorMessage = null;
     notifyListeners();
   }
 
-  /// Reset login flags after view handled navigation / snackbar.
   void resetLoginState() {
     isLoginSuccess = false;
     errorMessage = null;
     notifyListeners();
   }
 
-  /// Reset password-reset flags after view handled navigation / snackbar.
   void resetPasswordState() {
     isPasswordResetSuccess = false;
     errorMessage = null;

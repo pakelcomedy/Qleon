@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
-import '../../../core/services/auth_service.dart';
-import '../../../di/locator.dart';
 import '../../../app/app_routes.dart';
 
 class SplashView extends StatefulWidget {
@@ -28,99 +26,44 @@ class _SplashViewState extends State<SplashView>
       duration: const Duration(milliseconds: 700),
     );
 
-    _fade = CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeOut,
-    );
-
+    _fade = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
     _slide = Tween<double>(begin: 12, end: 0).animate(
-      CurvedAnimation(
-        parent: _controller,
-        curve: Curves.easeOutCubic,
-      ),
+      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
     );
 
     _controller.forward();
     _bootstrap();
   }
 
-  Future<User?> _waitForAuthState({Duration timeout = const Duration(seconds: 5)}) async {
-    // wait for the first auth state event, with timeout
-    try {
-      final user = await FirebaseAuth.instance.authStateChanges().first.timeout(timeout);
-      debugPrint('[Splash] authStateChanges.first emitted: user=${user?.uid}');
-      return user;
-    } catch (e) {
-      debugPrint('[Splash] authStateChanges.first timed out / error: $e');
-      return FirebaseAuth.instance.currentUser;
-    }
-  }
-
   Future<void> _bootstrap() async {
+    await Future.delayed(const Duration(milliseconds: 700));
+
+    // --- baca onboarding flag dari SharedPreferences ---
+    final prefs = await SharedPreferences.getInstance();
+    final hasSeenOnboarding = prefs.getBool('seen_onboarding') ?? false;
+    debugPrint('[Splash] seen_onboarding=$hasSeenOnboarding');
+
+    // --- ambil user login Firebase ---
+    User? user;
     try {
-      // small visual delay so the splash is visible
-      await Future.delayed(const Duration(milliseconds: 700));
-
-      // read onboarding flag (AuthService via locator if available, else SharedPreferences)
-      bool hasSeenOnboarding = false;
-      try {
-        if (locator.isRegistered<AuthService>()) {
-          final authService = locator<AuthService>();
-          hasSeenOnboarding = authService.hasSeenOnboarding;
-          debugPrint('[Splash] using AuthService.hasSeenOnboarding=$hasSeenOnboarding');
-        } else {
-          final prefs = await SharedPreferences.getInstance();
-          hasSeenOnboarding = prefs.getBool('seen_onboarding') ?? false;
-          debugPrint('[Splash] prefs seen_onboarding=$hasSeenOnboarding');
-        }
-      } catch (e) {
-        debugPrint('[Splash] reading onboarding flag failed: $e');
-        final prefs = await SharedPreferences.getInstance();
-        hasSeenOnboarding = prefs.getBool('seen_onboarding') ?? false;
-      }
-
-      // Wait for Firebase auth state with small retries
-      User? user = await _waitForAuthState(timeout: const Duration(seconds: 5));
-      if (user == null) {
-        // second try quickly
-        await Future.delayed(const Duration(milliseconds: 300));
-        user = FirebaseAuth.instance.currentUser;
-        debugPrint('[Splash] fallback currentUser after short wait: ${user?.uid}');
-      }
-
-      // final safety: try reload current user token (no-op if null)
-      if (user != null) {
-        try {
-          await user.reload();
-          debugPrint('[Splash] reloaded user; uid=${FirebaseAuth.instance.currentUser?.uid}');
-          user = FirebaseAuth.instance.currentUser;
-        } catch (e) {
-          debugPrint('[Splash] reload currentUser failed: $e');
-        }
-      }
-
-      if (!mounted) return;
-
-      if (!hasSeenOnboarding) {
-        _go(AppRoutes.onboarding);
-        return;
-      }
-
-      if (user != null) {
-        _go(AppRoutes.shell);
-        return;
-      }
-
-      _go(AppRoutes.login);
-    } catch (e, st) {
-      debugPrint('[Splash] bootstrap unexpected error: $e\n$st');
-      if (!mounted) return;
-      _go(AppRoutes.login);
+      user = await FirebaseAuth.instance.idTokenChanges().first.timeout(const Duration(seconds: 6));
+    } catch (_) {
+      user = FirebaseAuth.instance.currentUser;
     }
-  }
 
-  void _go(String route) {
-    Navigator.of(context).pushNamedAndRemoveUntil(route, (_) => false);
+    if (!mounted) return;
+
+    if (!hasSeenOnboarding) {
+      Navigator.of(context).pushNamedAndRemoveUntil(AppRoutes.onboarding, (_) => false);
+      return;
+    }
+
+    if (user != null) {
+      Navigator.of(context).pushNamedAndRemoveUntil(AppRoutes.shell, (_) => false);
+      return;
+    }
+
+    Navigator.of(context).pushNamedAndRemoveUntil(AppRoutes.login, (_) => false);
   }
 
   @override

@@ -1,41 +1,47 @@
 import 'package:flutter/material.dart';
-import 'login_view.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
+import '../../../app/app_routes.dart';
 
 class OnboardingView extends StatelessWidget {
   const OnboardingView({super.key});
 
-  void _goToLogin(BuildContext context) {
-    Navigator.pushReplacement(
-      context,
-      PageRouteBuilder(
-        transitionDuration: const Duration(milliseconds: 420),
-        pageBuilder: (_, __, ___) => const LoginView(),
-        transitionsBuilder: (_, animation, __, child) {
-          return SlideTransition(
-            position: Tween(
-              begin: const Offset(1, 0),
-              end: Offset.zero,
-            ).animate(CurvedAnimation(
-              parent: animation,
-              curve: Curves.easeOutCubic,
-            )),
-            child: child,
-          );
-        },
-      ),
-    );
+  /// Finish onboarding: simpan flag dulu, baru navigasi
+  Future<void> _finishOnboarding(BuildContext context) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('seen_onboarding', true);
+      debugPrint('[Onboarding] seen_onboarding=true');
+    } catch (e) {
+      debugPrint('[Onboarding] error saving seen_onboarding: $e');
+    }
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      debugPrint('[Onboarding] user logged in, go to AppShell');
+      if (context.mounted) {
+        Navigator.of(context).pushNamedAndRemoveUntil(AppRoutes.shell, (_) => false);
+      }
+    } else {
+      debugPrint('[Onboarding] user null, go to Login');
+      if (context.mounted) {
+        Navigator.of(context).pushNamedAndRemoveUntil(AppRoutes.login, (_) => false);
+      }
+    }
+  }
+
+  void _onHorizontalDragEnd(BuildContext context, DragEndDetails details) {
+    if (details.primaryVelocity != null && details.primaryVelocity! < -120) {
+      _finishOnboarding(context);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onHorizontalDragEnd: (details) {
-        if (details.primaryVelocity != null &&
-            details.primaryVelocity! < -120) {
-          _goToLogin(context);
-        }
-      },
+      onHorizontalDragEnd: (details) => _onHorizontalDragEnd(context, details),
       child: Scaffold(
         backgroundColor: Colors.white,
         body: SafeArea(
@@ -45,7 +51,6 @@ class OnboardingView extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: const [
                 Spacer(),
-
                 Text(
                   'Qleon',
                   style: TextStyle(
@@ -63,9 +68,7 @@ class OnboardingView extends StatelessWidget {
                     color: Colors.black54,
                   ),
                 ),
-
                 Spacer(),
-
                 _SwipeHint(),
               ],
             ),
@@ -76,7 +79,6 @@ class OnboardingView extends StatelessWidget {
   }
 }
 
-/// subtle, tidak mengganggu
 class _SwipeHint extends StatelessWidget {
   const _SwipeHint();
 
