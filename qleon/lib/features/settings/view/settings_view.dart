@@ -6,78 +6,121 @@ import 'privacy_view.dart';
 import 'blocked_user_view.dart';
 import 'about_app_view.dart';
 
-class SettingsView extends StatelessWidget {
+// ViewModel (pastikan file path sesuai)
+import '../viewmodel/settings_viewmodel.dart';
+import '../../../app/app_routes.dart';
+
+class SettingsView extends StatefulWidget {
   const SettingsView({super.key});
 
   @override
+  State<SettingsView> createState() => _SettingsViewState();
+}
+
+class _SettingsViewState extends State<SettingsView> {
+  late final SettingsViewModel vm;
+
+  @override
+  void initState() {
+    super.initState();
+    vm = SettingsViewModel();
+    vm.addListener(_vmListener);
+    vm.init(); // load initial data
+  }
+
+  void _vmListener() {
+    // show errors as SnackBar (UI responsibility)
+    if (vm.errorMessage != null && mounted) {
+      final msg = vm.errorMessage!;
+      // clear VM error after showing, so we don't show it repeatedly
+      vm.clearError();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
+  @override
+  void dispose() {
+    vm.removeListener(_vmListener);
+    vm.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF7F8FA),
-      appBar: _buildAppBar(context),
-      body: ListView(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        children: [
-          _Section(
-            title: 'Account',
+    return AnimatedBuilder(
+      animation: vm,
+      builder: (context, _) {
+        return Scaffold(
+          backgroundColor: const Color(0xFFF7F8FA),
+          appBar: _buildAppBar(context),
+          body: ListView(
+            padding: const EdgeInsets.symmetric(vertical: 12),
             children: [
-              _SettingsTile(
-                icon: Icons.badge_outlined,
-                title: 'Public identity',
-                subtitle: 'Your QR & public ID',
-                onTap: () => _go(context, const PublicIdentityView()),
+              _Section(
+                title: 'Account',
+                children: [
+                  _SettingsTile(
+                    icon: Icons.badge_outlined,
+                    title: 'Public identity',
+                    subtitle: 'Your QR & public ID',
+                    onTap: vm.isLoading ? null : () => _go(context, const PublicIdentityView()),
+                  ),
+                  _SettingsTile(
+                    icon: Icons.security_outlined,
+                    title: 'Security',
+                    subtitle: 'Encryption & account safety',
+                    onTap: vm.isLoading ? null : () => _go(context, const SecurityView()),
+                  ),
+                  _SettingsTile(
+                    icon: Icons.privacy_tip_outlined,
+                    title: 'Privacy',
+                    subtitle: 'Visibility & permissions',
+                    onTap: vm.isLoading ? null : () => _go(context, const PrivacyView()),
+                  ),
+                ],
               ),
-              _SettingsTile(
-                icon: Icons.security_outlined,
-                title: 'Security',
-                subtitle: 'Encryption & account safety',
-                onTap: () => _go(context, const SecurityView()),
+
+              const SizedBox(height: 16),
+
+              _Section(
+                title: 'Preferences',
+                children: [
+                  _SettingsTile(
+                    icon: Icons.block_outlined,
+                    title: 'Blocked users',
+                    subtitle: 'Manage blocked contacts',
+                    onTap: vm.isLoading ? null : () => _go(context, const BlockedUserView()),
+                  ),
+                ],
               ),
-              _SettingsTile(
-                icon: Icons.privacy_tip_outlined,
-                title: 'Privacy',
-                subtitle: 'Visibility & permissions',
-                onTap: () => _go(context, const PrivacyView()),
+
+              const SizedBox(height: 16),
+
+              _Section(
+                title: 'About',
+                children: [
+                  _SettingsTile(
+                    icon: Icons.info_outline,
+                    title: 'About Qleon',
+                    subtitle: 'Version, license, acknowledgements',
+                    onTap: vm.isLoading ? null : () => _go(context, const AboutAppView()),
+                  ),
+                ],
               ),
+
+              const SizedBox(height: 24),
+
+              // Logout tile uses vm.isLoggingOut to show loading/disable taps
+              _LogoutTile(
+                isLoading: vm.isLoggingOut,
+                onTap: vm.isLoggingOut ? null : () => _confirmLogout(context),
+              ),
+
+              const SizedBox(height: 32),
             ],
           ),
-
-          const SizedBox(height: 16),
-
-          _Section(
-            title: 'Preferences',
-            children: [
-              _SettingsTile(
-                icon: Icons.block_outlined,
-                title: 'Blocked users',
-                subtitle: 'Manage blocked contacts',
-                onTap: () => _go(context, const BlockedUserView()),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 16),
-
-          _Section(
-            title: 'About',
-            children: [
-              _SettingsTile(
-                icon: Icons.info_outline,
-                title: 'About Qleon',
-                subtitle: 'Version, license, acknowledgements',
-                onTap: () => _go(context, const AboutAppView()),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 24),
-
-          _LogoutTile(
-            onTap: () => _confirmLogout(context),
-          ),
-
-          const SizedBox(height: 32),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -167,9 +210,17 @@ class SettingsView extends StatelessWidget {
     );
 
     if (ok == true) {
-      // TODO: clear session / token / secure storage
-      // TODO: navigate to auth screen
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Logged out (placeholder)')));
+      // call ViewModel logout, show local loading
+      try {
+        await vm.logout();
+        // After successful logout, navigate to login (view handles nav)
+        Navigator.of(context).pushNamedAndRemoveUntil(AppRoutes.login, (_) => false);
+      } catch (e) {
+        final err = vm.errorMessage ?? e.toString();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Logout failed: $err')));
+        }
+      }
     }
   }
 }
@@ -222,7 +273,7 @@ class _SettingsTile extends StatelessWidget {
   final IconData icon;
   final String title;
   final String subtitle;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   const _SettingsTile({
     required this.icon,
@@ -271,12 +322,17 @@ class _SettingsTile extends StatelessWidget {
 }
 
 /// =============================================================
-/// LOGOUT TILE
+/// LOGOUT TILE (UI ONLY)
 /// =============================================================
 class _LogoutTile extends StatelessWidget {
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
+  final bool isLoading;
 
-  const _LogoutTile({required this.onTap});
+  const _LogoutTile({
+    super.key,
+    required this.onTap,
+    this.isLoading = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -286,19 +342,25 @@ class _LogoutTile extends StatelessWidget {
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
       ),
-      child: ListTile(
-        onTap: onTap,
-        leading: const Icon(
-          Icons.logout,
-          color: Colors.red,
-        ),
-        title: const Text(
-          'Log out',
-          style: TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w600,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: isLoading ? null : onTap,
+        child: ListTile(
+          leading: const Icon(
+            Icons.logout,
             color: Colors.red,
           ),
+          title: const Text(
+            'Log out',
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+              color: Colors.red,
+            ),
+          ),
+          trailing: isLoading
+              ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+              : const SizedBox.shrink(),
         ),
       ),
     );
