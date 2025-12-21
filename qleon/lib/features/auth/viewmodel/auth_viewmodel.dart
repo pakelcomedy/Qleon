@@ -1,3 +1,4 @@
+// auth_viewmodel.dart
 import 'package:flutter/material.dart';
 import 'dart:math';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -19,11 +20,19 @@ class AuthViewModel extends ChangeNotifier {
   final _auth = firebaseAuth;
   final _firestore = FirebaseFirestore.instance;
 
-  String _generateAutoName() {
+  // Generate candidate name like 0xA9F3C21B
+  String _generateAutoNameCandidate() {
     const chars = '0123456789ABCDEF';
     final rand = Random.secure();
     return '0x' +
         List.generate(8, (_) => chars[rand.nextInt(chars.length)]).join();
+  }
+
+  // temp generator (alphanumeric, length 6)
+  String _generateTempValue({int length = 6}) {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    final rand = Random.secure();
+    return List.generate(length, (_) => chars[rand.nextInt(chars.length)]).join();
   }
 
   bool get isLoggedIn => _auth.currentUser != null;
@@ -46,6 +55,45 @@ class AuthViewModel extends ChangeNotifier {
     }
   }
 
+  // Helper: check if a name exists in users collection
+  Future<bool> _nameExists(String name) async {
+    final snap = await _firestore
+        .collection('users')
+        .where('name', isEqualTo: name)
+        .limit(1)
+        .get();
+    return snap.docs.isNotEmpty;
+  }
+
+  // Helper: cleanup auth user (delete) and optionally user doc
+  Future<void> _cleanupAuthAndDoc({String? uid}) async {
+    try {
+      // delete users doc if exist
+      if (uid != null) {
+        try {
+          await _firestore.collection('users').doc(uid).delete();
+          debugPrint('[AuthVM] Deleted users/$uid doc during cleanup');
+        } catch (e) {
+          debugPrint('[AuthVM] Failed to delete users doc during cleanup: $e');
+        }
+      }
+
+      // delete the currently signed-in Auth user (if any)
+      try {
+        final u = _auth.currentUser;
+        if (u != null) {
+          await u.delete();
+          debugPrint('[AuthVM] Deleted Auth user during cleanup');
+        }
+      } catch (e) {
+        debugPrint('[AuthVM] Failed to delete Auth user during cleanup: $e');
+      }
+    } catch (e) {
+      debugPrint('[AuthVM] cleanup error: $e');
+    }
+  }
+
+  // Main register: create auth user, then write users/{uid} with unique name + temp
   Future<void> register() async {
     final email = emailController.text.trim();
     final password = passwordController.text;
@@ -60,8 +108,6 @@ class AuthViewModel extends ChangeNotifier {
     isRegisteredSuccess = false;
     notifyListeners();
 
-    final autoName = _generateAutoName();
-
     try {
       final credential = await _auth.createUserWithEmailAndPassword(
         email: email,
@@ -71,15 +117,100 @@ class AuthViewModel extends ChangeNotifier {
       final uid = credential.user?.uid;
       debugPrint('[AuthVM] createUser returned uid=$uid');
 
-      if (uid != null) {
-        await _firestore.collection("users").doc(uid).set({
-          "uid": uid,
-          "email": email,
-          "name": autoName,
-          "createdAt": FieldValue.serverTimestamp(),
-        });
+      if (uid == null) {
+        throw Exception('UID kosong setelah createUser');
       }
 
+      // We'll attempt to reserve a unique name by:
+      // 1) generate candidate
+      // 2) query for existing docs with that name
+      // 3) if none, write users/{uid}
+      // 4) after write, re-check how many docs have that name:
+      //    - if 1 => success
+      //    - if >1 => collision (concurrent writer), delete our doc and retry
+      //
+      // NOTE: This is not strictly atomic (no separate unique-index collection),
+      // but with retries and collision-check-after-write we minimize duplicates.
+      final int maxAttempts = 8;
+      bool stored = false;
+      String? finalName;
+      String? finalTemp;
+
+      for (int attempt = 0; attempt < maxAttempts; attempt++) {
+        final candidate = _generateAutoNameCandidate();
+        final temp = _generateTempValue();
+
+        // quick existence check
+        final exists = await _nameExists(candidate);
+        if (exists) {
+          debugPrint('[AuthVM] name collision (pre-check) for $candidate — retrying');
+          continue;
+        }
+
+        // attempt to write user doc
+        final userRef = _firestore.collection('users').doc(uid);
+
+        try {
+          await userRef.set({
+            'uid': uid,
+            'email': email,
+            'name': candidate,
+            'temp': temp,
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+
+          // after write, verify there is exactly one doc with that name
+          final recheck = await _firestore
+              .collection('users')
+              .where('name', isEqualTo: candidate)
+              .get();
+
+          if (recheck.docs.length == 1) {
+            // success
+            stored = true;
+            finalName = candidate;
+            finalTemp = temp;
+            debugPrint('[AuthVM] Stored users/$uid with unique name $candidate');
+            break;
+          } else {
+            // collision happened concurrently; remove our document and retry
+            debugPrint('[AuthVM] Collision detected after write for $candidate (count=${recheck.docs.length}). Removing our doc and retrying.');
+            try {
+              await userRef.delete();
+              debugPrint('[AuthVM] Deleted users/$uid doc due to collision');
+            } catch (delErr) {
+              debugPrint('[AuthVM] Failed to delete users doc after collision: $delErr');
+            }
+            // continue loop to try another candidate
+            continue;
+          }
+        } catch (writeErr) {
+          // writing failed (permission/network). Try cleanup and rethrow to outer handler
+          debugPrint('[AuthVM] Failed to write users/$uid: $writeErr');
+          // attempt to delete the auth user to avoid orphaned auth account
+          try {
+            await credential.user?.delete();
+            debugPrint('[AuthVM] Deleted auth user due to write failure');
+          } catch (delErr) {
+            debugPrint('[AuthVM] Failed to delete auth user after write failure: $delErr');
+          }
+          rethrow;
+        }
+      } // end attempts loop
+
+      if (!stored) {
+        // Could not secure a unique name after retries -> cleanup and error
+        debugPrint('[AuthVM] Unable to acquire unique name after $maxAttempts attempts. Cleaning up auth user.');
+        await _cleanupAuthAndDoc(uid: uid);
+        errorMessage = 'Gagal membuat akun (nama tidak tersedia). Coba lagi.';
+        isRegisteredSuccess = false;
+        isLoginSuccess = false;
+        isLoading = false;
+        notifyListeners();
+        return;
+      }
+
+      // optional: reload auth user and debug token
       try {
         await _auth.currentUser?.reload();
         final u = _auth.currentUser;
@@ -91,7 +222,7 @@ class AuthViewModel extends ChangeNotifier {
 
       isRegisteredSuccess = true;
       isLoginSuccess = _auth.currentUser != null;
-      debugPrint('[AuthVM] REGISTER SUCCESS uid=${_auth.currentUser?.uid}');
+      debugPrint('[AuthVM] REGISTER SUCCESS uid=${_auth.currentUser?.uid} name=$finalName temp=$finalTemp');
     } on FirebaseAuthException catch (e) {
       debugPrint('[AuthVM] REGISTER ERROR code=${e.code} message=${e.message}');
       switch (e.code) {
@@ -109,6 +240,17 @@ class AuthViewModel extends ChangeNotifier {
       }
     } catch (e) {
       debugPrint('[AuthVM] REGISTER ERROR: $e');
+      // If an auth user exists and we hit a crash, attempt cleanup
+      try {
+        final u = _auth.currentUser;
+        if (u != null) {
+          final uid = u.uid;
+          await _cleanupAuthAndDoc(uid: uid);
+        }
+      } catch (cleanupErr) {
+        debugPrint('[AuthVM] cleanup after exception failed: $cleanupErr');
+      }
+
       errorMessage = 'Terjadi kesalahan. Coba lagi.';
     } finally {
       isLoading = false;
