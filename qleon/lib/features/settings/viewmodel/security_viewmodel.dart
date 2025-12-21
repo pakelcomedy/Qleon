@@ -3,8 +3,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
 /// SecurityViewModel
-/// - Single responsibility: semua operasi Firebase auth terkait security.
-/// - View hanya observe isLoading / errorMessage / errorCode dan men-trigger UI (snackbars, dialogs).
+/// - Semua operasi Firebase auth terkait security.
+/// - View hanya membaca isLoading / errorMessage / errorCode dan men-trigger UI (snackbars, dialogs, navigation).
 class SecurityViewModel extends ChangeNotifier {
   final FirebaseAuth _auth = FirebaseAuth.instance;
 
@@ -54,14 +54,23 @@ class SecurityViewModel extends ChangeNotifier {
         return 'Password terlalu lemah';
       case 'network-request-failed':
         return 'Koneksi bermasalah. Periksa jaringan Anda.';
+      case 'invalid-credential':
+        return 'Kredensial tidak valid atau kedaluwarsa';
+      case 'user-token-expired':
+      case 'invalid-user-token':
+        return 'Sesi kedaluwarsa. Silakan keluar dan masuk kembali.';
       default:
         return fallback ?? code;
     }
   }
 
-  /// Reauthenticate (reauth) helper — returns true on success.
-  /// Use this if you want to ask user for password in a dialog and then call this separately.
+  // -----------------------
+  // Reauth helper
+  // -----------------------
+  /// Reauthenticate using current password.
+  /// Returns true on success, false on failure (and sets errorMessage).
   Future<bool> reauthenticateWithPassword(String currentPassword) async {
+    if (isLoading) return false;
     _setLoading(true);
     _setError(null);
     try {
@@ -88,16 +97,17 @@ class SecurityViewModel extends ChangeNotifier {
   // -----------------------
   // Email change
   // -----------------------
-
-  /// Change email by first reauthenticating with [currentPassword],
-  /// then calling verifyBeforeUpdateEmail(newEmail).
-  /// This sends a verification link to the NEW email. The actual account
-  /// email will be changed only after the user clicks that verification link.
+  /// Reauth dengan [currentPassword], lalu kirim verification ke [newEmail].
   ///
-  /// Returns true on success (verification email sent). On failure sets errorMessage and returns false.
+  /// Jika [signOutAfterEmailChange] = true (default), VM akan otomatis signOut
+  /// setelah verification email dikirim — ini mencegah token lama tersisa yang
+  /// sering menyebabkan error "credential expired".
+  ///
+  /// Returns true when verification email was successfully requested.
   Future<bool> changeEmailWithPassword({
     required String currentPassword,
     required String newEmail,
+    bool signOutAfterEmailChange = true,
   }) async {
     if (isLoading) return false;
     _setLoading(true);
@@ -115,12 +125,14 @@ class SecurityViewModel extends ChangeNotifier {
       final cred = EmailAuthProvider.credential(email: oldEmail, password: currentPassword);
       await user.reauthenticateWithCredential(cred);
 
-      // 2) request verify-before-update (recommended flow):
-      //    this sends a verification email to newEmail and will apply the change
-      //    only after the user verifies that new address.
+      // 2) request verify-before-update (kirim email verifikasi ke newEmail)
       await user.verifyBeforeUpdateEmail(newEmail);
 
-      // success: verification email sent
+      // 3) optional: sign out to clear local auth state / tokens
+      if (signOutAfterEmailChange) {
+        await _auth.signOut();
+      }
+
       return true;
     } on FirebaseAuthException catch (e) {
       _setError(_friendlyMessageFromCode(e.code, e.message), e.code);
@@ -133,12 +145,12 @@ class SecurityViewModel extends ChangeNotifier {
     }
   }
 
-  /// (Optional) Directly update email after reauth (if you want immediate update).
-  /// Note: some Firebase projects / rules might require verification or disallow direct update.
-  /// Prefer verifyBeforeUpdateEmail in most apps.
+  /// Directly update email after reauth. Not recommended for many apps,
+  /// prefer verifyBeforeUpdateEmail. Returns true when update succeeded.
   Future<bool> changeEmailDirectWithPassword({
     required String currentPassword,
     required String newEmail,
+    bool signOutAfterUpdate = false,
   }) async {
     if (isLoading) return false;
     _setLoading(true);
@@ -158,6 +170,11 @@ class SecurityViewModel extends ChangeNotifier {
       // update immediately
       await user.updateEmail(newEmail);
       await user.reload();
+
+      if (signOutAfterUpdate) {
+        await _auth.signOut();
+      }
+
       return true;
     } on FirebaseAuthException catch (e) {
       _setError(_friendlyMessageFromCode(e.code, e.message), e.code);
@@ -177,6 +194,7 @@ class SecurityViewModel extends ChangeNotifier {
   Future<bool> changePassword({
     required String currentPassword,
     required String newPassword,
+    bool signOutAfterChange = false,
   }) async {
     if (isLoading) return false;
     _setLoading(true);
@@ -194,6 +212,11 @@ class SecurityViewModel extends ChangeNotifier {
       await user.reauthenticateWithCredential(credential);
       await user.updatePassword(newPassword);
       await user.reload();
+
+      if (signOutAfterChange) {
+        await _auth.signOut();
+      }
+
       return true;
     } on FirebaseAuthException catch (e) {
       _setError(_friendlyMessageFromCode(e.code, e.message), e.code);
@@ -225,6 +248,20 @@ class SecurityViewModel extends ChangeNotifier {
       return false;
     } finally {
       _setLoading(false);
+    }
+  }
+
+  // -----------------------
+  // Force sign out helper
+  // -----------------------
+  /// Forcefully sign out current user. Useful when you need to clear state after email change.
+  Future<void> forceSignOut() async {
+    try {
+      await _auth.signOut();
+    } catch (_) {
+      // ignore errors here; view can show message if needed
+    } finally {
+      notifyListeners();
     }
   }
 

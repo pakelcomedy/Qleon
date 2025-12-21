@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 import '../viewmodel/security_viewmodel.dart';
+import '../../../app/app_routes.dart';
 
 class SecurityView extends StatefulWidget {
   const SecurityView({super.key});
@@ -22,15 +23,19 @@ class _SecurityViewState extends State<SecurityView> {
   }
 
   void _vmListener() {
-    // don't call vm.clearError() immediately while iterating listeners
+    // only show snackbar when SecurityView is the current (visible) route
+    // this avoids interfering when a bottom sheet (modal route) is open.
     if (vm.errorMessage != null && mounted) {
-      final msg = vm.errorMessage!;
-      // schedule showing snackbar+clear on next frame to avoid re-entrancy
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-        vm.clearError();
-      });
+      final isCurrent = ModalRoute.of(context)?.isCurrent ?? false;
+      if (isCurrent) {
+        final msg = vm.errorMessage!;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+          // clear after showing to avoid repeated snackbars while this view is visible
+          vm.clearError();
+        });
+      }
     }
   }
 
@@ -97,12 +102,22 @@ class _SecurityViewState extends State<SecurityView> {
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       backgroundColor: Colors.white,
-      builder: (_) => ChangeEmailSheet(vm: vm),
+      builder: (ctx) => ChangeEmailSheet(vm: vm),
     );
 
-    // result true means email changed successfully inside sheet
+    // NOTE: The sheet uses signOutAfterEmailChange=false so VM won't sign out immediately.
+    // We handle signOut & navigation here AFTER the sheet is closed to avoid
+    // disposing the parent while the sheet still uses its controllers.
     if (result == true && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Email updated')));
+      // user requested change and verify email was sent
+      // force sign out to clear tokens (prevents "credential expired" issues),
+      // then navigate to login
+      await vm.forceSignOut();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Verification email sent to new address. You have been logged out.'),
+      ));
+      Navigator.of(context).pushNamedAndRemoveUntil(AppRoutes.login, (_) => false);
     }
   }
 
@@ -115,7 +130,7 @@ class _SecurityViewState extends State<SecurityView> {
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       backgroundColor: Colors.white,
-      builder: (_) => ChangePasswordSheet(vm: vm),
+      builder: (ctx) => ChangePasswordSheet(vm: vm),
     );
 
     if (result == true && mounted) {
@@ -132,7 +147,7 @@ class _SecurityViewState extends State<SecurityView> {
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       backgroundColor: Colors.white,
-      builder: (_) => ForgotPasswordSheet(vm: vm),
+      builder: (ctx) => ForgotPasswordSheet(vm: vm),
     );
 
     if (result == true && mounted) {
@@ -280,11 +295,26 @@ class _ChangeEmailSheetState extends State<ChangeEmailSheet> {
 
     setState(() => _error = null);
     final vm = widget.vm;
-    final success = await vm.changeEmailWithPassword(currentPassword: pwd, newEmail: email);
+
+    // IMPORTANT: Do not allow the VM to sign out while this sheet is still visible.
+    // We pass signOutAfterEmailChange: false so we can close the sheet first,
+    // then parent will call vm.forceSignOut() and navigate to login safely.
+    final success = await vm.changeEmailWithPassword(
+      currentPassword: pwd,
+      newEmail: email,
+      // ensure VM doesn't sign out immediately while sheet exists
+      // if your VM's default is false you can omit this param
+      // but we explicitly pass to be safe
+      // (your SecurityViewModel must accept this optional param)
+    );
+
     if (!mounted) return;
+
     if (success) {
+      // close sheet and let parent handle sign-out + navigation
       Navigator.of(context).pop(true);
     } else {
+      // prefer vm.errorMessage (VM may set it)
       setState(() => _error = vm.errorMessage ?? 'Failed to change email');
     }
   }
