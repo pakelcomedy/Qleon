@@ -216,6 +216,13 @@ class _PublicIdentityBody extends StatelessWidget {
                     const SnackBar(content: Text('QR data copied')),
                   );
                 },
+                child: Text(
+                  'Tap to copy QR payload',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey.shade600,
+                  ),
+                ),
               ),
             ],
           ],
