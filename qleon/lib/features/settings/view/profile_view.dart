@@ -1,11 +1,35 @@
+// public_identity_view.dart
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import '../viewmodel/profile_viewmodel.dart';
 
 class PublicIdentityView extends StatelessWidget {
   const PublicIdentityView({super.key});
 
   @override
   Widget build(BuildContext context) {
-    const publicId = '0xA94F32C1F8E21B9D';
+    // Provide ProfileViewModel above this screen (if not provided globally)
+    // Jika sudah disediakan di level lebih atas, hapus ChangeNotifierProvider ini.
+    return ChangeNotifierProvider<ProfileViewModel>(
+      create: (_) => ProfileViewModel(),
+      child: const _PublicIdentityBody(),
+    );
+  }
+}
+
+class _PublicIdentityBody extends StatelessWidget {
+  const _PublicIdentityBody({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final vm = context.watch<ProfileViewModel>();
+
+    final publicId = vm.name ?? '';
+    final qrData = vm.qrData;
+    final isLoading = vm.isLoading;
+    final isUpdating = vm.isUpdatingTemp;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF7F8FA),
@@ -17,7 +41,7 @@ class PublicIdentityView extends StatelessWidget {
           children: [
             const SizedBox(height: 12),
 
-            /// QR CODE PLACEHOLDER
+            // QR CODE container
             Container(
               width: 220,
               height: 220,
@@ -26,12 +50,29 @@ class PublicIdentityView extends StatelessWidget {
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: const Color(0xFFE5E7EB)),
               ),
-              child: const Center(
-                child: Icon(
-                  Icons.qr_code_2,
-                  size: 140,
-                  color: Color(0xFF111827),
-                ),
+              child: Center(
+                child: Builder(builder: (_) {
+                  if (isLoading) {
+                    return const CircularProgressIndicator();
+                  }
+
+                  if (qrData.isEmpty) {
+                    // fallback placeholder (same icon as you had)
+                    return const Icon(
+                      Icons.qr_code_2,
+                      size: 140,
+                      color: Color(0xFF111827),
+                    );
+                  }
+
+                  // render QR using vm.qrData (name+temp+uid tanpa spasi)
+                  return QrImageView(
+                    data: qrData,
+                    version: QrVersions.auto,
+                    size: 200.0,
+                    backgroundColor: Colors.white,
+                  );
+                }),
               ),
             ),
 
@@ -59,7 +100,7 @@ class PublicIdentityView extends StatelessWidget {
 
             const SizedBox(height: 20),
 
-            /// PUBLIC ID
+            // PUBLIC ID display + copy button
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(
@@ -74,7 +115,7 @@ class PublicIdentityView extends StatelessWidget {
                 children: [
                   Expanded(
                     child: Text(
-                      publicId,
+                      publicId.isEmpty ? '-' : publicId,
                       style: const TextStyle(
                         fontSize: 15,
                         fontWeight: FontWeight.w500,
@@ -84,11 +125,16 @@ class PublicIdentityView extends StatelessWidget {
                   ),
                   IconButton(
                     icon: const Icon(Icons.copy, size: 20),
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Public ID copied')),
-                      );
-                    },
+                    onPressed: publicId.isEmpty
+                        ? null
+                        : () async {
+                            // capture messenger before async gap
+                            final messenger = ScaffoldMessenger.of(context);
+                            await Clipboard.setData(ClipboardData(text: publicId));
+                            messenger.showSnackBar(
+                              const SnackBar(content: Text('Public ID copied')),
+                            );
+                          },
                   ),
                 ],
               ),
@@ -96,7 +142,7 @@ class PublicIdentityView extends StatelessWidget {
 
             const SizedBox(height: 24),
 
-            /// INFO
+            // info text
             const Text(
               'This identity is cryptographically generated.\n'
               'It does not reveal your name, number, or device.',
@@ -106,6 +152,72 @@ class PublicIdentityView extends StatelessWidget {
               ),
               textAlign: TextAlign.center,
             ),
+
+            const SizedBox(height: 20),
+
+            // change QR code button
+            SizedBox(
+              width: 220,
+              child: ElevatedButton(
+                onPressed: isUpdating
+                    ? null
+                    : () async {
+                        // capture messenger before async gap to avoid use_build_context_synchronously warning
+                        final messenger = ScaffoldMessenger.of(context);
+
+                        await vm.changeTemp();
+
+                        final err = vm.errorMessage;
+                        if (err != null) {
+                          messenger.showSnackBar(SnackBar(content: Text(err)));
+                        } else {
+                          messenger.showSnackBar(
+                            const SnackBar(content: Text('QR code changed')),
+                          );
+                        }
+                      },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF111827),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                child: isUpdating
+                    ? const SizedBox(
+                        height: 18,
+                        width: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                        ),
+                      )
+                    : const Text(
+                        'Change QR code',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+              ),
+            ),
+
+            const SizedBox(height: 12),
+
+            // extra: show current qrData and copy button (optional)
+            if (qrData.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              GestureDetector(
+                onTap: () async {
+                  final messenger = ScaffoldMessenger.of(context);
+                  await Clipboard.setData(ClipboardData(text: qrData));
+                  messenger.showSnackBar(
+                    const SnackBar(content: Text('QR data copied')),
+                  );
+                },
+              ),
+            ],
           ],
         ),
       ),
