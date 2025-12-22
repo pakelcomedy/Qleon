@@ -7,7 +7,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 
 /// Simple contact model used by NewChatView & AddContactView
 class ChatContact {
-  final String publicId; // unique public identity (e.g. name from other user)
+  final String publicId; // unique public identity (e.g. other user's uid)
   final String displayName; // local alias
   final String publicStatus; // e.g. "Online" or "Last seen ..."
   final bool isOnline;
@@ -18,6 +18,9 @@ class ChatContact {
     required this.publicStatus,
     required this.isOnline,
   });
+
+  /// compatibility: some UI code expects `.id`
+  String get id => publicId;
 
   Map<String, dynamic> toMap() => {
         'publicId': publicId,
@@ -123,6 +126,101 @@ class NewChatViewModel extends ChangeNotifier {
       await _contactsRef(uid).doc(publicId).delete();
     } catch (e) {
       debugPrint('[NewChatVM] removeContact error: $e');
+      rethrow;
+    }
+  }
+
+  /// Helper: deterministic conversation id so same pair -> same id
+  /// Order UIDs lexicographically so A_B == B_A.
+  String _makeConversationId(String a, String b) {
+    final list = [a, b]..sort();
+    return '${list[0]}_${list[1]}';
+  }
+
+  /// Find existing conversation between current user and a contact (by contact.publicId).
+  /// If none exists, create a new conversation document and return its id.
+  ///
+  /// IMPORTANT: this uses a deterministic conversation id (uidA_uidB) so both sides point to the same doc.
+  Future<String> openOrCreateConversation(ChatContact contact) async {
+    final uid = currentUid;
+    if (uid == null) throw Exception('User not logged in');
+
+    if (contact.publicId.isEmpty) throw ArgumentError('contact.publicId must not be empty');
+
+    final otherId = contact.publicId;
+
+    // Build canonical conversation id (deterministic)
+    final conversationId = _makeConversationId(uid, otherId);
+    final convRef = _firestore.collection('conversations').doc(conversationId);
+
+    try {
+      // 1) Check canonical doc existence first (fast)
+      final doc = await convRef.get();
+      if (doc.exists) {
+        return conversationId;
+      }
+
+      // 2) If canonical not present, search for any conversation that includes both members
+      // (useful if older conversations used random ids).
+      final query = await _firestore
+          .collection('conversations')
+          .where('members', arrayContains: uid)
+          .limit(50)
+          .get();
+
+      for (final d in query.docs) {
+        final data = d.data();
+        final members = (data['members'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? <String>[];
+        if (members.contains(otherId)) {
+          // found existing conversation that includes the contact
+          return d.id;
+        }
+      }
+
+      // 3) Not found -> create conversation using the deterministic id so both sides point here.
+      final createdAt = FieldValue.serverTimestamp();
+      final payload = {
+        'members': [uid, otherId],
+        'isGroup': false,
+        'createdAt': createdAt,
+        'lastUpdated': createdAt,
+      };
+
+      // Use merge: true to be safe if doc gets created between get() and set()
+      await convRef.set(payload, SetOptions(merge: true));
+
+      // 4) create per-user chat summary for current user (and attempt for other user)
+      final myChatRef = _firestore.collection('users').doc(uid).collection('chats').doc(conversationId);
+      await myChatRef.set({
+        'title': contact.displayName,
+        'lastMessage': '',
+        'lastUpdated': FieldValue.serverTimestamp(),
+        'otherPublicId': contact.publicId,
+        'isGroup': false,
+        'pinned': false,
+        'archived': false,
+      }, SetOptions(merge: true));
+
+      // Trying to write to the other user's chat summary may be blocked by rules.
+      // Wrap in try/catch and ignore failure (server-side should handle fan-out ideally).
+      try {
+        final otherChatRef = _firestore.collection('users').doc(otherId).collection('chats').doc(conversationId);
+        await otherChatRef.set({
+          'title': (contact.displayName.isNotEmpty) ? contact.displayName : uid,
+          'lastMessage': '',
+          'lastUpdated': FieldValue.serverTimestamp(),
+          'otherPublicId': uid,
+          'isGroup': false,
+          'pinned': false,
+          'archived': false,
+        }, SetOptions(merge: true));
+      } catch (e) {
+        debugPrint('[NewChatVM] unable to write other user chat summary (may be expected): $e');
+      }
+
+      return conversationId;
+    } catch (e) {
+      debugPrint('[NewChatVM] openOrCreateConversation error: $e');
       rethrow;
     }
   }

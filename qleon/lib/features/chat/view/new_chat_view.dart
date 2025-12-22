@@ -37,7 +37,7 @@ class _NewChatBody extends StatelessWidget {
             child: vm.isLoading
                 ? const Center(child: CircularProgressIndicator())
                 : vm.contacts.isEmpty
-                    ? _EmptyContactsPlaceholder()
+                    ? const _EmptyContactsPlaceholder()
                     : ListView.builder(
                         padding: const EdgeInsets.all(12),
                         itemCount: vm.contacts.length,
@@ -45,11 +45,35 @@ class _NewChatBody extends StatelessWidget {
                           final contact = vm.contacts[index];
                           return _ContactCard(
                             contact: contact,
-                            onTap: () {
+                            onTap: () async {
+                              // Try to open existing conversation or create one.
+                              // We assume ChatContact has an `id`/identifier field.
+                              // If your model uses a different name (publicId/uid), replace `contact.id`
+                              // with the proper field.
+                              String conversationId;
+                              try {
+                                // If your ViewModel exposes a helper to create/open a conversation,
+                                // prefer that (e.g. vm.openConversationForContact(contact))
+                                if (vm.openOrCreateConversation != null) {
+                                  // optional: if you added this helper
+                                  conversationId = await vm.openOrCreateConversation!(contact);
+                                } else {
+                                  // fallback: use contact.id as conversation id
+                                  // (Replace if your contact model uses another field)
+                                  conversationId = contact.id;
+                                }
+                              } catch (_) {
+                                // Fallback to contact.id if helper absent or failed
+                                conversationId = contact.id;
+                              }
+
+                              // navigate only if mounted
+                              if (!context.mounted) return;
                               Navigator.push(
                                 context,
                                 MaterialPageRoute(
                                   builder: (_) => ChatRoomView(
+                                    conversationId: conversationId,
                                     title: contact.displayName,
                                     isGroup: false,
                                   ),
@@ -127,25 +151,37 @@ class _NewChatBody extends StatelessWidget {
                   await vm.addContact(result);
 
                   // immediately navigate to chat room
-                  if (context.mounted) {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => ChatRoomView(
-                          title: result.displayName,
-                          isGroup: false,
+                  if (!context.mounted) return;
 
-                        ),
-                      ),
-                    );
+                  // same assumption: ChatContact has `id`. Replace if different.
+                  String conversationId;
+                  try {
+                    if (vm.openOrCreateConversation != null) {
+                      conversationId = await vm.openOrCreateConversation!(result);
+                    } else {
+                      conversationId = result.id;
+                    }
+                  } catch (_) {
+                    conversationId = result.id;
                   }
+
+                  if (!context.mounted) return;
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => ChatRoomView(
+                        conversationId: conversationId,
+                        title: result.displayName,
+                        isGroup: false,
+                      ),
+                    ),
+                  );
                 } catch (e) {
                   // show snackbar on error
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Gagal menambahkan kontak: $e')),
-                    );
-                  }
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Gagal menambahkan kontak: $e')),
+                  );
                 }
               }
             },
@@ -166,7 +202,7 @@ class _NewChatBody extends StatelessWidget {
           borderRadius: BorderRadius.circular(14),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.04),
+              color: Colors.black.withAlpha((0.04 * 255).round()),
               blurRadius: 10,
             ),
           ],
@@ -193,6 +229,7 @@ class _ActionTile extends StatelessWidget {
   final VoidCallback onTap;
 
   const _ActionTile({
+    super.key,
     required this.icon,
     required this.title,
     required this.subtitle,
@@ -210,7 +247,7 @@ class _ActionTile extends StatelessWidget {
           borderRadius: BorderRadius.circular(18),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.04),
+              color: Colors.black.withAlpha((0.04 * 255).round()),
               blurRadius: 12,
             ),
           ],
@@ -260,6 +297,7 @@ class _ContactCard extends StatelessWidget {
   final VoidCallback onTap;
 
   const _ContactCard({
+    super.key,
     required this.contact,
     required this.onTap,
   });
@@ -276,7 +314,7 @@ class _ContactCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(18),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.04),
+              color: Colors.black.withAlpha((0.04 * 255).round()),
               blurRadius: 12,
               offset: const Offset(0, 4),
             ),
@@ -320,7 +358,7 @@ class _ContactCard extends StatelessWidget {
 
 class _IdentityIndicator extends StatelessWidget {
   final bool isOnline;
-  const _IdentityIndicator({required this.isOnline});
+  const _IdentityIndicator({super.key, required this.isOnline});
 
   @override
   Widget build(BuildContext context) {
@@ -340,6 +378,8 @@ class _IdentityIndicator extends StatelessWidget {
 }
 
 class _EmptyContactsPlaceholder extends StatelessWidget {
+  const _EmptyContactsPlaceholder({super.key});
+
   @override
   Widget build(BuildContext context) {
     return Center(

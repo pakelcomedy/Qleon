@@ -89,17 +89,6 @@ class _AddContactBodyState extends State<_AddContactBody> {
             ),
           ),
 
-          /// BUTTON GALERI
-          Positioned(
-            bottom: 20,
-            right: 20,
-            child: FloatingActionButton(
-              backgroundColor: Colors.white,
-              onPressed: () => _pickImageFromGallery(context),
-              child: const Icon(Icons.photo, color: Colors.black),
-            ),
-          ),
-
           // processing overlay
           Consumer<AddContactViewModel>(
             builder: (context, vm, _) {

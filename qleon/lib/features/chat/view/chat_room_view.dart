@@ -1,160 +1,190 @@
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+// chat_room_view.dart
+// Simplified chat UI wired to the simplified ChatRoomViewModel.
+// Focus: minimal, working 1:1 chat using the VM created earlier.
+// NOTE: business logic (send, delete, selection, message store) lives in ChatRoomViewModel.
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:flutter/services.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
+import '../viewmodel/chat_room_viewmodel.dart';
 import '../../call/view/call_view.dart';
 import '../../group/view/group_detail_view.dart';
 import 'contact_detail_view.dart';
 
-/// Chat room view with:
-/// - message multi-select (long press to start, tap to toggle)
-/// - single-select actions: reply / copy / delete
-/// - multi-select: copy / delete (reply hidden)
-/// - small swipe-right to reply (gesture + small translation)
-/// - reply preview above input (like WhatsApp)
 class ChatRoomView extends StatefulWidget {
+  final String conversationId;
   final String title;
   final bool isGroup;
 
-  const ChatRoomView({
-    super.key,
-    required this.title,
-    this.isGroup = false,
-  });
+  const ChatRoomView({super.key, required this.conversationId, required this.title, this.isGroup = false});
 
   @override
   State<ChatRoomView> createState() => _ChatRoomViewState();
 }
 
 class _ChatRoomViewState extends State<ChatRoomView> {
-  final Set<int> _selected = {}; // store message indices
-  String? _replyMessageId; // id of message we're replying to
+  late final ChatRoomViewModel vm;
   final TextEditingController _controller = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
 
-  bool get selectionMode => _selected.isNotEmpty;
+  // UI-only state:
+  String? _replyToMessageId; // UI chooses which message to reply to; VM keeps messages/selection
+  int _lastMessagesLength = 0;
+  String? _lastError;
 
-  _DummyMessage? get _replyMessage {
-    if (_replyMessageId == null) return null;
-    for (var m in dummyMessages) {
-      if (m.id == _replyMessageId) return m;
-    }
-    return null;
+  bool get _selectionMode => vm.selectedMessageIds.isNotEmpty;
+  bool get _canSend => _controller.text.trim().isNotEmpty && !vm.isSending && !_selectionMode;
+
+  @override
+  void initState() {
+    super.initState();
+
+    vm = ChatRoomViewModel(conversationId: widget.conversationId);
+
+    // Initialize VM (network/listener setup belongs in VM)
+    vm.init().catchError((e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Init error: $e')));
+    });
+
+    // show VM-level error messages (UI only shows them)
+    vm.addListener(() {
+      final err = vm.errorMessage;
+      if (err != null && err != _lastError) {
+        _lastError = err;
+        if (mounted) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+          });
+        }
+      }
+    });
+
+    _controller.addListener(_onTextChanged);
   }
 
   @override
   void dispose() {
+    vm.dispose();
+    _controller.removeListener(_onTextChanged);
     _controller.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
-  void _startSelection(int index) {
-    HapticFeedback.lightImpact();
-    setState(() {
-      _selected.add(index);
-      _replyMessageId = null; // disable reply when selecting
-    });
+  void _onTextChanged() {
+    // purely UI: triggers rebuild so send button state updates
+    setState(() {});
   }
 
-  void _toggleSelection(int index) {
-    HapticFeedback.selectionClick();
-    setState(() {
-      if (_selected.contains(index)) _selected.remove(index);
-      else _selected.add(index);
-      if (_selected.isNotEmpty) _replyMessageId = null; // reply hidden when selection active
-    });
-  }
-
-  void _clearSelection() => setState(() => _selected.clear());
-
-  void _setReply(String messageId) {
-    setState(() {
-      _replyMessageId = messageId;
-      _selected.clear(); // reply mode cancels selection
-    });
-  }
-
-  void _cancelReply() => setState(() => _replyMessageId = null);
-
-  void _sendMessage() {
+  Future<void> _send() async {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
 
-    final newMsg = _DummyMessage(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
-      isMe: true,
-      text: text,
-      time: _formatTimeNow(),
-    );
+    // Delegate sending to VM — VM handles persistence/networking/etc.
+    try {
+      await vm.sendTextMessage(text, replyToMessageId: _replyToMessageId);
+      if (!mounted) return;
 
-    setState(() {
-      dummyMessages.add(newMsg); // newest appended to end
+      // UI response to success:
       _controller.clear();
       _cancelReply();
-    });
+
+      // small delay so list updates can settle then scroll
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scrollToBottom(animated: true);
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to send: $e')));
+    }
+  }
+
+  void _scrollToBottom({bool animated = false}) {
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position.maxScrollExtent;
+    if (animated) {
+      _scrollController.animateTo(pos, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+    } else {
+      _scrollController.jumpTo(pos);
+    }
+  }
+
+  // Selection operations are VM responsibilities; view only triggers them.
+  void _startSelection(String messageId) {
     HapticFeedback.lightImpact();
+    vm.startSelection(messageId);
   }
 
-  String _formatTimeNow() {
-    final now = DateTime.now();
-    final hh = now.hour.toString().padLeft(2, '0');
-    final mm = now.minute.toString().padLeft(2, '0');
-    return '$hh:$mm';
+  void _toggleSelection(String messageId) {
+    HapticFeedback.selectionClick();
+    vm.toggleSelection(messageId);
   }
 
-  void _openAttachmentSheet() {
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (context) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Wrap(
-              runSpacing: 8,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    _AttachmentTile(
-                      icon: Icons.photo_library,
-                      label: 'Gallery',
-                      onTap: () {
-                        Navigator.pop(context);
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Open gallery (placeholder)')));
-                      },
-                    ),
-                    _AttachmentTile(
-                      icon: Icons.insert_drive_file,
-                      label: 'Document',
-                      onTap: () {
-                        Navigator.pop(context);
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Open documents (placeholder)')));
-                      },
-                    ),
-                    _AttachmentTile(
-                      icon: Icons.location_on,
-                      label: 'Location',
-                      onTap: () {
-                        Navigator.pop(context);
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Pick location (placeholder)')));
-                      },
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        );
-      },
+  void _clearSelection() {
+    vm.clearSelection();
+  }
+
+  // Reply preview state is UI-only (which message user chose to reply to)
+  void _setReply(String messageId) {
+    setState(() {
+      _replyToMessageId = messageId;
+    });
+    vm.clearSelection(); // selection is a VM concern; clear via VM call
+  }
+
+  void _cancelReply() {
+    setState(() {
+      _replyToMessageId = null;
+    });
+  }
+
+  Future<void> _confirmDeleteSelection() async {
+    final count = vm.selectedMessageIds.length;
+    final ok = await _showConfirmSheet(
+      title: count == 1 ? 'Delete message?' : 'Delete $count messages?',
+      message: count == 1 ? 'Delete the selected message?' : 'Delete selected messages from this conversation?',
+      destructive: true,
+      primaryLabel: 'Delete',
     );
+    if (ok == true) {
+      final ids = vm.selectedMessageIds.toList();
+      try {
+        // Delegate deletions to VM
+        await Future.wait(ids.map((id) => vm.softDeleteMessage(id)));
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Deleted')));
+        _clearSelection();
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to delete: $e')));
+      }
+    }
   }
 
-  // Unified bottom-sheet confirmation helper
-  Future<bool?> _showConfirmSheet({
-    required String title,
-    required String message,
-    bool destructive = false,
-    String primaryLabel = 'Confirm',
-  }) {
+  Future<void> _showClearChatDialog() async {
+    final ok = await _showConfirmSheet(
+      title: 'Clear chat?',
+      message: 'All messages in this conversation will be soft-deleted (kept for audit).',
+      destructive: true,
+      primaryLabel: 'Clear',
+    );
+    if (ok == true) {
+      try {
+        final ids = vm.messages.map((m) => m.id).toList();
+        await Future.wait(ids.map((id) => vm.softDeleteMessage(id)));
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Chat cleared')));
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to clear chat: $e')));
+      }
+    }
+  }
+
+  Future<bool?> _showConfirmSheet({required String title, required String message, bool destructive = false, String primaryLabel = 'Confirm'}) {
     return showModalBottomSheet<bool>(
       context: context,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
@@ -167,14 +197,12 @@ class _ChatRoomViewState extends State<ChatRoomView> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Grab handle
                 Center(
-                  child: Container(
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)),
-                  ),
-                ),
+                    child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)),
+                )),
                 const SizedBox(height: 12),
                 Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 8),
@@ -215,141 +243,130 @@ class _ChatRoomViewState extends State<ChatRoomView> {
     );
   }
 
-  Future<void> _showClearChatDialog() async {
-    final ok = await _showConfirmSheet(
-      title: 'Clear chat?',
-      message: 'All messages in this conversation will be deleted locally.',
-      destructive: true,
-      primaryLabel: 'Clear',
-    );
-    if (ok == true) {
-      setState(() {
-        dummyMessages.clear();
-      });
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Chat cleared (UI only)')));
-    }
-  }
-
   Future<void> _confirmCallAndNavigate() async {
     final ok = await _showConfirmSheet(
       title: 'Call ${widget.title}?',
       message: 'Start a voice call to this contact/group?',
-      destructive: false,
       primaryLabel: 'Call',
     );
     if (ok == true) {
+      if (!mounted) return;
       Navigator.push(context, MaterialPageRoute(builder: (_) => const CallView()));
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final reply = _replyMessage;
-    return Scaffold(
-      backgroundColor: const Color(0xFFF1F3F6),
-      appBar: selectionMode ? _buildSelectionAppBar() : _buildNormalAppBar(),
-      body: Column(
-        children: [
-          Expanded(
-            child: _MessageList(
-              selected: _selected,
-              onLongPressSelect: _startSelection,
-              onTapSelect: (i) {
-                if (selectionMode) _toggleSelection(i);
-                // else could open message actions (not implemented here)
-              },
-              onSwipeReply: (message) {
-                if (!selectionMode) _setReply(message.id);
-              },
-            ),
-          ),
-          if (reply != null && !selectionMode) ReplyPreview(message: reply, onCancel: _cancelReply),
-          _buildInputBar(),
-        ],
-      ),
-    );
-  }
-
-  AppBar _buildNormalAppBar() {
+  PreferredSizeWidget _buildNormalAppBar() {
     return AppBar(
       backgroundColor: Colors.white,
       elevation: 0,
-      leading: IconButton(
-        icon: const Icon(Icons.arrow_back, color: Color(0xFF374151)),
-        onPressed: () => Navigator.pop(context),
-      ),
+      leading: IconButton(icon: const Icon(Icons.arrow_back, color: Color(0xFF374151)), onPressed: () => Navigator.pop(context)),
       title: Text(widget.title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15, color: Color(0xFF111827))),
       actions: [
-        IconButton(
-          icon: const Icon(Icons.call_outlined, color: Color(0xFF374151)),
-          onPressed: _confirmCallAndNavigate,
-        ),
-        PopupMenuButton<_ChatMenuAction>(
+        IconButton(icon: const Icon(Icons.call_outlined, color: Color(0xFF374151)), onPressed: _confirmCallAndNavigate),
+        PopupMenuButton<int>(
           icon: const Icon(Icons.more_vert, color: Color(0xFF374151)),
           onSelected: (action) {
-            if (action == _ChatMenuAction.info) {
+            if (action == 0) {
               Navigator.push(context, MaterialPageRoute(builder: (_) => widget.isGroup ? const GroupDetailView() : const ContactDetailView()));
-            } else if (action == _ChatMenuAction.clear) {
+            } else if (action == 1) {
               _showClearChatDialog();
             }
           },
           itemBuilder: (_) => [
-            PopupMenuItem(value: _ChatMenuAction.info, child: Text(widget.isGroup ? 'Group info' : 'Contact info')),
-            const PopupMenuItem(value: _ChatMenuAction.clear, child: Text('Clear chat', style: TextStyle(color: Colors.red))),
+            PopupMenuItem(value: 0, child: Text(widget.isGroup ? 'Group info' : 'Contact info')),
+            const PopupMenuItem(value: 1, child: Text('Clear chat', style: TextStyle(color: Colors.red))),
           ],
         ),
       ],
     );
   }
 
-  AppBar _buildSelectionAppBar() {
-    final single = _selected.length == 1;
+  PreferredSizeWidget _buildSelectionAppBar() {
+    final single = vm.selectedMessageIds.length == 1;
     return AppBar(
       backgroundColor: Colors.white,
       elevation: 1,
       leading: IconButton(icon: const Icon(Icons.close, color: Color(0xFF111827)), onPressed: _clearSelection),
-      title: Text(single ? '1 selected' : '${_selected.length} selected', style: const TextStyle(color: Color(0xFF111827))),
+      title: Text(single ? '1 selected' : '${vm.selectedMessageIds.length} selected', style: const TextStyle(color: Color(0xFF111827))),
       actions: [
         if (single)
           IconButton(
             icon: const Icon(Icons.reply, color: Color(0xFF4F46E5)),
             onPressed: () {
-              final idx = _selected.first;
-              final m = dummyMessages[idx];
-              _setReply(m.id);
+              final id = vm.selectedMessageIds.first;
+              _setReply(id);
             },
           ),
         IconButton(
           icon: const Icon(Icons.copy, color: Color(0xFF4F46E5)),
           onPressed: () async {
-            final texts = _selected.map((i) => dummyMessages[i].text).join('\n');
+            // compose copy text from VM-provided messages (UI only)
+            final texts = vm.selectedMessageIds.map((id) => vm.findMessageById(id)?.text ?? '').join('\n');
             await Clipboard.setData(ClipboardData(text: texts));
+            if (!mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Copied')));
             _clearSelection();
           },
         ),
-        IconButton(
-          icon: const Icon(Icons.delete, color: Colors.red),
-          onPressed: () => _confirmDeleteSelected(context),
-        ),
+        IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: _confirmDeleteSelection),
       ],
     );
   }
 
-  Future<void> _confirmDeleteSelected(BuildContext context) async {
-    final count = _selected.length;
-    final ok = await _showConfirmSheet(
-      title: count == 1 ? 'Delete message?' : 'Delete $count messages?',
-      message: count == 1 ? 'Choose delete option' : 'This will delete the selected messages from your device.',
-      destructive: true,
-      primaryLabel: 'Delete',
+  @override
+  Widget build(BuildContext context) {
+    return ChangeNotifierProvider<ChatRoomViewModel>.value(
+      value: vm,
+      child: Consumer<ChatRoomViewModel>(builder: (context, model, _) {
+        // auto-scroll on new messages (UI behavior)
+        if (model.messages.length != _lastMessagesLength) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            _scrollToBottom(animated: true);
+          });
+          _lastMessagesLength = model.messages.length;
+        }
+
+        final replyMessage = (_replyToMessageId != null) ? model.findMessageById(_replyToMessageId!) : null;
+
+        return Scaffold(
+          backgroundColor: const Color(0xFFF1F3F6),
+          appBar: _selectionMode ? _buildSelectionAppBar() : _buildNormalAppBar(),
+          body: Column(
+            children: [
+              Expanded(
+                child: model.isLoading
+                    ? const Center(child: CircularProgressIndicator())
+                    : _MessagesListView(
+                        messages: model.messages,
+                        selectedIds: model.selectedMessageIds,
+                        onLongPressSelect: (id) => _startSelection(id),
+                        onTapSelect: (id) {
+                          if (_selectionMode) _toggleSelection(id);
+                        },
+                        onSwipeReply: (msg) {
+                          if (!_selectionMode) _setReply(msg.id);
+                        },
+                        scrollController: _scrollController,
+                      ),
+              ),
+              if (replyMessage != null && !_selectionMode)
+                ReplyPreviewWidget(
+                  key: ValueKey('reply_preview_${replyMessage.id}'),
+                  message: replyMessage,
+                  onCancel: _cancelReply,
+                ),
+              _buildInputBar(model),
+            ],
+          ),
+        );
+      }),
     );
-    if (ok == true) setState(() => _selected.clear());
   }
 
-  Widget _buildInputBar() {
-    final disabled = selectionMode;
-    final canSend = _controller.text.trim().isNotEmpty && !disabled;
+  Widget _buildInputBar(ChatRoomViewModel model) {
+    final disabled = _selectionMode;
+    final canSend = _canSend;
 
     return SafeArea(
       child: AnimatedContainer(
@@ -360,7 +377,7 @@ class _ChatRoomViewState extends State<ChatRoomView> {
           color: Colors.white,
           boxShadow: [
             BoxShadow(
-              color: disabled ? Colors.black12.withOpacity(0.06) : Colors.black12,
+              color: disabled ? Colors.black12.withAlpha(15) : Colors.black12,
               blurRadius: 8,
             ),
           ],
@@ -368,13 +385,10 @@ class _ChatRoomViewState extends State<ChatRoomView> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            // ➕ Attachment
             IconButton(
               icon: Icon(Icons.add, color: disabled ? Colors.grey.shade400 : const Color(0xFF4F46E5)),
               onPressed: disabled ? null : _openAttachmentSheet,
             ),
-
-            // ✍️ Text input (textarea-like)
             Expanded(
               child: AnimatedOpacity(
                 duration: const Duration(milliseconds: 180),
@@ -391,11 +405,11 @@ class _ChatRoomViewState extends State<ChatRoomView> {
                         keyboardType: TextInputType.multiline,
                         minLines: 1,
                         maxLines: 6,
-                        textInputAction: TextInputAction.newline,
+                        textInputAction: TextInputAction.send,
                         decoration: const InputDecoration(hintText: 'Type a message', border: InputBorder.none, isDense: true),
                         onChanged: (_) => setState(() {}),
                         onSubmitted: (_) {
-                          if (canSend) _sendMessage();
+                          if (canSend) _send();
                         },
                       ),
                     ),
@@ -403,10 +417,7 @@ class _ChatRoomViewState extends State<ChatRoomView> {
                 ),
               ),
             ),
-
             const SizedBox(width: 8),
-
-            // 🚀 Send
             AnimatedScale(
               scale: canSend ? 1 : 0.92,
               duration: const Duration(milliseconds: 180),
@@ -418,7 +429,7 @@ class _ChatRoomViewState extends State<ChatRoomView> {
                   onPressed: canSend
                       ? () {
                           HapticFeedback.lightImpact();
-                          _sendMessage();
+                          _send();
                         }
                       : null,
                 ),
@@ -429,70 +440,52 @@ class _ChatRoomViewState extends State<ChatRoomView> {
       ),
     );
   }
-}
 
-/// Attachment tile used in bottom sheet
-class _AttachmentTile extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-  const _AttachmentTile({required this.icon, required this.label, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: SizedBox(
-        width: 90,
-        child: Column(
-          children: [
-            CircleAvatar(radius: 28, backgroundColor: const Color(0xFFEEF2FF), child: Icon(icon, color: const Color(0xFF4F46E5))),
-            const SizedBox(height: 8),
-            Text(label, style: const TextStyle(fontSize: 13), textAlign: TextAlign.center),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Message list widget: handles taps/longpress/swipe -> delegates to callbacks
-class _MessageList extends StatelessWidget {
-  final Set<int> selected;
-  final void Function(int) onLongPressSelect;
-  final void Function(int) onTapSelect;
-  final void Function(_DummyMessage) onSwipeReply;
-
-  const _MessageList({
-    required this.selected,
-    required this.onLongPressSelect,
-    required this.onTapSelect,
-    required this.onSwipeReply,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    // reverse true to have newest at bottom.
-    // Map builder index to message index: idx = length-1 - indexFromFront
-    return ListView.builder(
-      reverse: true,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
-      itemCount: dummyMessages.length,
-      itemBuilder: (context, indexFromFront) {
-        final idx = dummyMessages.length - 1 - indexFromFront;
-        final message = dummyMessages[idx];
-        final isSelected = selected.contains(idx);
-
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: _MessageTile(
-            key: ValueKey(message.id),
-            message: message,
-            selected: isSelected,
-            selectionMode: selected.isNotEmpty,
-            onTap: () => onTapSelect(idx),
-            onLongPress: () => onLongPressSelect(idx),
-            onSwipeReply: () => onSwipeReply(message),
+  void _openAttachmentSheet() {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Wrap(
+              runSpacing: 8,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    _AttachmentTile(
+                      icon: Icons.photo_library,
+                      label: 'Gallery',
+                      onTap: () async {
+                        Navigator.pop(context);
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Open gallery (placeholder)')));
+                      },
+                    ),
+                    _AttachmentTile(
+                      icon: Icons.insert_drive_file,
+                      label: 'Document',
+                      onTap: () async {
+                        Navigator.pop(context);
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Open documents (placeholder)')));
+                      },
+                    ),
+                    _AttachmentTile(
+                      icon: Icons.location_on,
+                      label: 'Location',
+                      onTap: () {
+                        Navigator.pop(context);
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Pick location (placeholder)')));
+                      },
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         );
       },
@@ -500,33 +493,61 @@ class _MessageList extends StatelessWidget {
   }
 }
 
-/// Single message tile (stateful to handle small drag/translation)
-class _MessageTile extends StatefulWidget {
-  final _DummyMessage message;
+class _MessagesListView extends StatelessWidget {
+  final List<ChatMessage> messages; // oldest -> newest
+  final Set<String> selectedIds;
+  final void Function(String id) onLongPressSelect;
+  final void Function(String id) onTapSelect;
+  final void Function(ChatMessage msg) onSwipeReply;
+  final ScrollController scrollController;
+
+  const _MessagesListView({super.key, required this.messages, required this.selectedIds, required this.onLongPressSelect, required this.onTapSelect, required this.onSwipeReply, required this.scrollController});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.builder(
+      controller: scrollController,
+      reverse: false,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+      itemCount: messages.length,
+      itemBuilder: (context, index) {
+        final msg = messages[index];
+        final isSelected = selectedIds.contains(msg.id);
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: _MessageTileMV(
+            key: ValueKey(msg.id),
+            message: msg,
+            allMessages: messages,
+            selected: isSelected,
+            onTap: () => onTapSelect(msg.id),
+            onLongPress: () => onLongPressSelect(msg.id),
+            onSwipeReply: () => onSwipeReply(msg),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _MessageTileMV extends StatefulWidget {
+  final ChatMessage message;
+  final List<ChatMessage> allMessages;
   final bool selected;
-  final bool selectionMode;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
   final VoidCallback onSwipeReply;
 
-  const _MessageTile({
-    super.key,
-    required this.message,
-    required this.selected,
-    required this.selectionMode,
-    required this.onTap,
-    required this.onLongPress,
-    required this.onSwipeReply,
-  });
+  const _MessageTileMV({super.key, required this.message, required this.allMessages, required this.selected, required this.onTap, required this.onLongPress, required this.onSwipeReply});
 
   @override
-  State<_MessageTile> createState() => _MessageTileState();
+  State<_MessageTileMV> createState() => _MessageTileMVState();
 }
 
-class _MessageTileState extends State<_MessageTile> with SingleTickerProviderStateMixin {
+class _MessageTileMVState extends State<_MessageTileMV> with SingleTickerProviderStateMixin {
   double _dragX = 0.0;
   late final AnimationController _animController;
-  static const double triggerDistance = 40.0; // small swipe threshold
+  static const double triggerDistance = 40.0;
 
   @override
   void initState() {
@@ -541,7 +562,6 @@ class _MessageTileState extends State<_MessageTile> with SingleTickerProviderSta
   }
 
   void _onHorizontalDragUpdate(DragUpdateDetails d) {
-    if (widget.selectionMode) return;
     setState(() {
       _dragX += d.delta.dx;
       if (_dragX < 0) _dragX = 0;
@@ -550,10 +570,6 @@ class _MessageTileState extends State<_MessageTile> with SingleTickerProviderSta
   }
 
   void _onHorizontalDragEnd(DragEndDetails e) {
-    if (widget.selectionMode) {
-      _resetDrag();
-      return;
-    }
     if (_dragX >= triggerDistance) {
       HapticFeedback.lightImpact();
       widget.onSwipeReply();
@@ -564,16 +580,28 @@ class _MessageTileState extends State<_MessageTile> with SingleTickerProviderSta
   void _resetDrag() {
     _animController.reset();
     _animController.forward(from: 0);
-    setState(() {
-      _dragX = 0;
-    });
+    setState(() => _dragX = 0);
   }
 
   @override
   Widget build(BuildContext context) {
-    final isMe = widget.message.isMe;
+    final currentUid = FirebaseAuth.instance.currentUser?.uid ?? 'unknown';
+    final isMe = widget.message.senderId == currentUid;
     final bgColor = isMe ? const Color(0xFF4F46E5) : Colors.white;
-    final textColor = isMe ? Colors.white : const Color(0xFF111827);
+    final textColor = isMe ? Colors.white : const Color.fromARGB(255, 55, 116, 248);
+    final time = _formatTimestamp(widget.message.createdAt);
+
+    // find replied message locally (UI only)
+    ChatMessage? replied;
+    if (widget.message.replyToMessageId != null) {
+      try {
+        replied = widget.allMessages.firstWhere((m) => m.id == widget.message.replyToMessageId);
+      } catch (_) {
+        replied = null;
+      }
+    }
+
+    final contentText = widget.message.isDeleted ? 'Message deleted' : widget.message.text;
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -582,19 +610,19 @@ class _MessageTileState extends State<_MessageTile> with SingleTickerProviderSta
       onHorizontalDragUpdate: _onHorizontalDragUpdate,
       onHorizontalDragEnd: _onHorizontalDragEnd,
       child: Transform.translate(
-        offset: Offset(_dragX * 0.5, 0), // small visual move for feedback
+        offset: Offset(_dragX * 0.5, 0),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
           curve: Curves.easeInOut,
           padding: const EdgeInsets.symmetric(vertical: 6),
           decoration: BoxDecoration(
-            color: widget.selected ? Colors.indigo.withOpacity(0.12) : Colors.transparent,
+            color: widget.selected ? Colors.indigo.withAlpha((0.12 * 255).round()) : Colors.transparent,
             borderRadius: BorderRadius.circular(12),
           ),
           child: Align(
             alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 280),
+              constraints: const BoxConstraints(maxWidth: 320),
               child: Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -609,14 +637,34 @@ class _MessageTileState extends State<_MessageTile> with SingleTickerProviderSta
                 child: Column(
                   crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
                   children: [
-                    Text(widget.message.text, style: TextStyle(color: textColor)),
+                    if (replied != null)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 6),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: isMe ? Colors.white10 : Colors.grey.shade100,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          replied.text,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: isMe ? Colors.white70 : Colors.black87, fontSize: 12),
+                        ),
+                      ),
+                    Text(contentText, style: TextStyle(color: textColor, fontStyle: widget.message.isDeleted ? FontStyle.italic : FontStyle.normal)),
                     const SizedBox(height: 6),
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(widget.message.time, style: TextStyle(color: textColor.withOpacity(0.7), fontSize: 10)),
+                        Text(time, style: TextStyle(color: textColor.withAlpha((0.7 * 255).round()), fontSize: 10)),
                         if (widget.selected) const SizedBox(width: 8),
                         if (widget.selected) const Icon(Icons.check_circle, size: 16, color: Color(0xFF4F46E5)),
+                        if (widget.message.isLocal)
+                          const Padding(
+                            padding: EdgeInsets.only(left: 6),
+                            child: SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.5)),
+                          ),
                       ],
                     ),
                   ],
@@ -628,18 +676,28 @@ class _MessageTileState extends State<_MessageTile> with SingleTickerProviderSta
       ),
     );
   }
+
+  static String _formatTimestamp(Timestamp ts) {
+    final dt = ts.toDate();
+    final now = DateTime.now();
+    if (dt.year == now.year && dt.month == now.month && dt.day == now.day) {
+      final hh = dt.hour.toString().padLeft(2, '0');
+      final mm = dt.minute.toString().padLeft(2, '0');
+      return '$hh:$mm';
+    }
+    return '${dt.day}/${dt.month}/${dt.year}';
+  }
 }
 
-/// Reply preview (above input)
-class ReplyPreview extends StatelessWidget {
-  final _DummyMessage message;
+class ReplyPreviewWidget extends StatelessWidget {
+  final ChatMessage message;
   final VoidCallback onCancel;
 
-  const ReplyPreview({required this.message, required this.onCancel});
+  const ReplyPreviewWidget({super.key, required this.message, required this.onCancel});
 
   @override
   Widget build(BuildContext context) {
-    final label = message.isMe ? 'You' : 'Contact';
+    final label = message.senderId == (FirebaseAuth.instance.currentUser?.uid ?? '') ? 'You' : 'Contact';
     return Container(
       color: Colors.white,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -664,27 +722,26 @@ class ReplyPreview extends StatelessWidget {
   }
 }
 
-/// Chat menu actions
-enum _ChatMenuAction { info, clear }
+class _AttachmentTile extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  const _AttachmentTile({super.key, required this.icon, required this.label, required this.onTap});
 
-/// Simple message model for UI demo
-class _DummyMessage {
-  final String id;
-  final bool isMe;
-  final String text;
-  final String time;
-
-  const _DummyMessage({
-    required this.id,
-    required this.isMe,
-    required this.text,
-    required this.time,
-  });
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: SizedBox(
+        width: 90,
+        child: Column(
+          children: [
+            CircleAvatar(radius: 28, backgroundColor: const Color(0xFFEEF2FF), child: Icon(icon, color: const Color(0xFF4F46E5))),
+            const SizedBox(height: 8),
+            Text(label, style: const TextStyle(fontSize: 13), textAlign: TextAlign.center),
+          ],
+        ),
+      ),
+    );
+  }
 }
-
-/// Dummy data (UI only). "final" list so we can add/remove items in demo.
-final List<_DummyMessage> dummyMessages = [
-  const _DummyMessage(id: 'm1', isMe: true, text: 'Halo, sudah lihat file?', time: '21:10'),
-  const _DummyMessage(id: 'm2', isMe: false, text: 'Sudah, nanti aku cek', time: '21:11'),
-  const _DummyMessage(id: 'm3', isMe: true, text: 'Sip 👍', time: '21:12'),
-];
