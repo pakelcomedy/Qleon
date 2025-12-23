@@ -100,46 +100,37 @@ class ChatSummary {
 
 /// Production-ready ViewModel for ChatList
 /// - listens to users/{uid}/chats (persisted per-user summaries)
-/// - ALSO listens to conversations where current user is a member and updates list
-///   when new messages arrive (useful when server-side fan-out is not present)
+/// - ALSO listens to conversations where current user is a member and attaches
+///   *one message listener per conversation* to receive realtime last-message updates.
 class ChatListViewModel extends ChangeNotifier {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
-  /// internal subscription to user's chat summaries
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _sub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _sub; // users/{uid}/chats
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _conversationsSub; // conversations where member
 
-  /// subscription to conversations that include current user
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _conversationsSub;
-
-  /// master map of chats (prevents duplicates and allows O(1) updates)
   final Map<String, ChatSummary> _chatMap = {};
+  List<ChatSummary> _cachedChats = [];
 
-  /// derived ordered list (cached)
-  List<ChatSummary> _chats = [];
-
-  /// selection set for UI (by id)
   final Set<String> selectedIds = {};
 
   bool isLoading = true;
-  bool isBusy = false; // general in-flight flag for operations
+  bool isBusy = false;
   String? errorMessage;
 
-  // pagination
   static const int defaultPageSize = 30;
   int pageSize = defaultPageSize;
   DocumentSnapshot<Map<String, dynamic>>? _lastDoc;
   bool hasMore = true;
   bool isPaginating = false;
 
-  // search query (client-side)
   String _query = '';
-
-  // whether to include archived chats in the list
   bool _includeArchived = false;
-
-  // small cache for user display names to reduce reads
   final Map<String, String> _userDisplayCache = {};
+
+  // helper caches & subscriptions per conversation to track last message realtime
+  final Map<String, StreamSubscription<QuerySnapshot<Map<String, dynamic>>>> _msgSubs = {};
+  final Map<String, Map<String, dynamic>?> _convCache = {}; // allow nullable convo data
 
   ChatListViewModel() {
     _init();
@@ -147,11 +138,10 @@ class ChatListViewModel extends ChangeNotifier {
 
   String? get currentUid => _auth.currentUser?.uid;
 
-  /// Public accessor: filtered & ordered list of chats (unmodifiable)
   List<ChatSummary> get chats {
-    if (_query.isEmpty) return List.unmodifiable(_chats);
+    if (_query.isEmpty) return List.unmodifiable(_cachedChats);
     final q = _query.toLowerCase();
-    return List.unmodifiable(_chats.where((c) {
+    return List.unmodifiable(_cachedChats.where((c) {
       return c.title.toLowerCase().contains(q) || c.lastMessage.toLowerCase().contains(q);
     }).toList());
   }
@@ -159,10 +149,6 @@ class ChatListViewModel extends ChangeNotifier {
   bool get selectionMode => selectedIds.isNotEmpty;
   bool get hasSelection => selectedIds.isNotEmpty;
 
-  // ============================================================
-  // Initialization: subscribe to snapshot for first page (realtime)
-  // Also subscribe to conversations for incoming messages so UI updates.
-  // ============================================================
   Future<void> _init() async {
     final uid = currentUid;
     if (uid == null) {
@@ -177,15 +163,20 @@ class ChatListViewModel extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // cancel existing
       await _sub?.cancel();
       await _conversationsSub?.cancel();
+      // cancel all message subs
+      for (final s in _msgSubs.values) {
+        await s.cancel();
+      }
+      _msgSubs.clear();
+      _convCache.clear();
       _chatMap.clear();
-      _chats = [];
+      _cachedChats = [];
       _lastDoc = null;
       hasMore = true;
 
-      // build base query for per-user chat summaries
+      // listen to per-user chat summaries (existing persisted view)
       Query<Map<String, dynamic>> baseQuery = _firestore
           .collection('users')
           .doc(uid)
@@ -198,11 +189,9 @@ class ChatListViewModel extends ChangeNotifier {
         baseQuery = baseQuery.where('archived', isEqualTo: false);
       }
 
-      // Listen to per-user chat summaries (existing behavior)
       _sub = baseQuery.snapshots().listen((snap) {
         _lastDoc = snap.docs.isNotEmpty ? snap.docs.last : null;
         hasMore = snap.docs.length >= pageSize;
-
         var changed = false;
 
         for (final change in snap.docChanges) {
@@ -225,13 +214,10 @@ class ChatListViewModel extends ChangeNotifier {
         }
 
         if (changed) {
-          _rebuildSortedList();
-          notifyListeners();
+          _rebuildSortedListAndNotify();
         } else {
-          // still notify loading state if this was first arrival
           if (isLoading) notifyListeners();
         }
-
         isLoading = false;
         errorMessage = null;
       }, onError: (e) {
@@ -240,20 +226,26 @@ class ChatListViewModel extends ChangeNotifier {
         notifyListeners();
       });
 
-      // ALSO: listen to conversations where current user is a member.
-      // This ensures UI updates when someone sends a message even if users/{uid}/chats is not updated.
-      _conversationsSub = _firestore
-          .collection('conversations')
-          .where('members', arrayContains: uid)
-          .orderBy('lastUpdated', descending: true)
-          .snapshots()
-          .listen((snap) {
-        // For each conversation doc changed, update our local chat summary (merge).
+      // Listen to conversations that include current user (no orderBy to avoid index issues)
+      _conversationsSub = _firestore.collection('conversations').where('members', arrayContains: uid).snapshots().listen((snap) {
         for (final change in snap.docChanges) {
           final doc = change.doc;
-          _updateSummaryFromConversation(doc.id, doc.data()).catchError((e) {
-            debugPrint('[ChatListVM] _updateSummaryFromConversation error: $e');
-          });
+          final convId = doc.id;
+          final convData = doc.data();
+          // cache conv metadata (note: doc.data() may be null)
+          _convCache[convId] = convData;
+          if (change.type == DocumentChangeType.removed) {
+            // cancel message listener + remove from map
+            _cancelMessageListener(convId);
+            if (_chatMap.containsKey(convId)) {
+              _chatMap.remove(convId);
+              _rebuildSortedListAndNotify();
+            }
+          } else {
+            // On added/modified: ensure we have a message listener for this conversation,
+            // and let message listener drive the lastMessage updates (realtime).
+            _ensureMessageListener(convId, convData);
+          }
         }
       }, onError: (e) {
         debugPrint('[ChatListVM] conversations listener error: $e');
@@ -265,7 +257,6 @@ class ChatListViewModel extends ChangeNotifier {
     }
   }
 
-  // Helper: decide if two summaries differ (to avoid unnecessary rebuilds)
   bool _isDifferent(ChatSummary a, ChatSummary b) {
     return a.title != b.title ||
         a.isGroup != b.isGroup ||
@@ -277,42 +268,42 @@ class ChatListViewModel extends ChangeNotifier {
         a.lastUpdated.millisecondsSinceEpoch != b.lastUpdated.millisecondsSinceEpoch;
   }
 
-  // Rebuilds _chats sorted from _chatMap
-  void _rebuildSortedList() {
+  void _rebuildSortedListAndNotify() {
     final list = _chatMap.values.toList();
     list.sort(_chatComparator);
-    _chats = list;
+    _cachedChats = list;
+    notifyListeners();
   }
 
-  // Comparator: pinned (true first) then lastUpdated desc (null safe)
   int _chatComparator(ChatSummary a, ChatSummary b) {
     if (a.pinned && !b.pinned) return -1;
     if (!a.pinned && b.pinned) return 1;
     final aMillis = a.lastUpdated.millisecondsSinceEpoch;
     final bMillis = b.lastUpdated.millisecondsSinceEpoch;
-    return bMillis.compareTo(aMillis); // descending
+    return bMillis.compareTo(aMillis);
   }
 
-  /// Manual refresh (re-run initial query)
   Future<void> refresh() async {
     await _sub?.cancel();
     await _conversationsSub?.cancel();
+    for (final s in _msgSubs.values) {
+      await s.cancel();
+    }
+    _msgSubs.clear();
+    _convCache.clear();
     _lastDoc = null;
     hasMore = true;
     isLoading = true;
     _chatMap.clear();
-    _chats = [];
+    _cachedChats = [];
     notifyListeners();
     await _init();
   }
 
-  /// pagination: load next page once user scrolls
   Future<void> loadMore() async {
     if (isPaginating || !hasMore) return;
     final uid = currentUid;
     if (uid == null) return;
-
-    // If we don't have a lastDoc (e.g. no results) then nothing to paginate
     if (_lastDoc == null) return;
 
     isPaginating = true;
@@ -341,7 +332,7 @@ class ChatListViewModel extends ChangeNotifier {
       }
       _lastDoc = nextSnap.docs.isNotEmpty ? nextSnap.docs.last : _lastDoc;
       hasMore = nextSnap.docs.length >= pageSize;
-      _rebuildSortedList();
+      _rebuildSortedListAndNotify();
       errorMessage = null;
     } catch (e) {
       errorMessage = e.toString();
@@ -351,62 +342,69 @@ class ChatListViewModel extends ChangeNotifier {
     }
   }
 
-  // ============================================================
-  // When a conversation document changes, build or update a ChatSummary.
-  // We fetch the most recent message (messages subcollection) to show lastMessage.
-  // We also try to resolve the "other" member's display name (cached).
-  // ============================================================
-  Future<void> _updateSummaryFromConversation(String convId, Map<String, dynamic>? convData) async {
+  // Ensure there's a single listener for the last message of convId
+  void _ensureMessageListener(String convId, Map<String, dynamic>? convData) {
+    if (_msgSubs.containsKey(convId)) {
+      // already listening
+      return;
+    }
+
+    final msgsRef = _firestore.collection('conversations').doc(convId).collection('messages');
+    final sub = msgsRef.orderBy('createdAt', descending: true).limit(1).snapshots().listen((snap) async {
+      if (snap.docs.isEmpty) {
+        // no messages yet -> still create summary from convData
+        await _mergeAndPersistSummaryFromConv(convId, convData, null);
+        return;
+      }
+      final mdoc = snap.docs.first;
+      await _mergeAndPersistSummaryFromConv(convId, convData, mdoc);
+    }, onError: (e) {
+      debugPrint('[ChatListVM] message listener error for $convId: $e');
+    });
+
+    _msgSubs[convId] = sub;
+  }
+
+  Future<void> _cancelMessageListener(String convId) async {
+    final s = _msgSubs.remove(convId);
+    if (s != null) {
+      await s.cancel();
+    }
+    _convCache.remove(convId);
+  }
+
+  Future<void> _mergeAndPersistSummaryFromConv(String convId, Map<String, dynamic>? convData, QueryDocumentSnapshot<Map<String, dynamic>>? mdoc) async {
     final uid = currentUid;
-    if (uid == null || convData == null) return;
+    if (uid == null) return;
 
     try {
-      final members = (convData['members'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [];
-      final isGroup = (convData['isGroup'] as bool?) ?? false;
-      final lastUpdatedFromConv = convData['lastUpdated'] as Timestamp?;
-      Timestamp lastUpdated = lastUpdatedFromConv ?? Timestamp.now();
+      final members = (convData?['members'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [];
+      final isGroup = (convData?['isGroup'] as bool?) ?? false;
 
-      // determine other member(s)
       String otherId = '';
       if (!isGroup) {
         otherId = members.firstWhere((m) => m != uid, orElse: () => '');
       }
 
-      // find last message (messages subcollection, orderBy createdAt desc limit 1)
       String lastMessageText = '';
-      Timestamp? lastMessageTs;
-      try {
-        final msgsSnap = await _firestore
-            .collection('conversations')
-            .doc(convId)
-            .collection('messages')
-            .orderBy('createdAt', descending: true)
-            .limit(1)
-            .get();
-        if (msgsSnap.docs.isNotEmpty) {
-          final mdoc = msgsSnap.docs.first;
-          final mdata = mdoc.data();
-          lastMessageText = (mdata['text'] as String?) ?? '';
-          lastMessageTs = (mdata['createdAt'] is Timestamp) ? mdata['createdAt'] as Timestamp : null;
-        }
-      } catch (e) {
-        debugPrint('[ChatListVM] failed to get last message for $convId: $e');
+      Timestamp lastMessageTs = convData?['lastUpdated'] as Timestamp? ?? Timestamp.now();
+      if (mdoc != null) {
+        final mdata = mdoc.data();
+        lastMessageText = (mdata['text'] as String?) ?? '';
+        final rawTs = mdata['createdAt'];
+        if (rawTs is Timestamp) lastMessageTs = rawTs;
       }
 
-      if (lastMessageTs != null) lastUpdated = lastMessageTs;
-
-      // resolve other display name (cache)
       String displayName = otherId;
       if (otherId.isNotEmpty) {
         displayName = await _getUserDisplayName(otherId) ?? otherId;
       } else if (isGroup) {
-        // try to get title from conversation metadata if present
-        displayName = (convData['title'] as String?) ?? 'Group';
+        displayName = (convData?['title'] as String?) ?? 'Group';
       } else {
         displayName = convId;
       }
 
-      // preserve pinned/archived/unreadCount if exists in users/{uid}/chats/{convId}
+      // preserve per-user prefs if present
       final userChatRef = _firestore.collection('users').doc(uid).collection('chats').doc(convId);
       int unreadCount = 0;
       bool pinned = false;
@@ -433,22 +431,20 @@ class ChatListViewModel extends ChangeNotifier {
         title: titleToWrite,
         isGroup: isGroup,
         lastMessage: lastMessageText,
-        lastUpdated: lastUpdated,
+        lastUpdated: lastMessageTs,
         unreadCount: unreadCount,
         pinned: pinned,
         archived: archived,
         otherPublicId: otherPublicId,
       );
 
-      // merge into local map and persist to users/{uid}/chats for this user
       final existing = _chatMap[convId];
       if (existing == null || _isDifferent(existing, summary)) {
         _chatMap[convId] = summary;
-        _rebuildSortedList();
-        notifyListeners();
+        _rebuildSortedListAndNotify();
       }
 
-      // persist summary for this user under users/{uid}/chats/{convId} so it's available on reload
+      // persist summary for this user (merge)
       try {
         await userChatRef.set({
           'title': summary.title,
@@ -461,15 +457,13 @@ class ChatListViewModel extends ChangeNotifier {
           'otherPublicId': summary.otherPublicId,
         }, SetOptions(merge: true));
       } catch (e) {
-        // ignore write errors (rules may prevent writing to other user's docs)
         debugPrint('[ChatListVM] failed to persist users chat summary $convId: $e');
       }
     } catch (e) {
-      debugPrint('[ChatListVM] _updateSummaryFromConversation general error: $e');
+      debugPrint('[ChatListVM] merge error for $convId: $e');
     }
   }
 
-  // Lightweight resolver for display name (caching)
   Future<String?> _getUserDisplayName(String uid) async {
     if (_userDisplayCache.containsKey(uid)) return _userDisplayCache[uid];
     try {
@@ -487,19 +481,18 @@ class ChatListViewModel extends ChangeNotifier {
     }
   }
 
-  // ============================================================
-  // Selection helpers
-  // ============================================================
+  // Selection helpers and rest kept same as before...
   void startSelection(String chatId) {
     selectedIds.add(chatId);
     notifyListeners();
   }
 
   void toggleSelection(String chatId) {
-    if (selectedIds.contains(chatId))
+    if (selectedIds.contains(chatId)) {
       selectedIds.remove(chatId);
-    else
+    } else {
       selectedIds.add(chatId);
+    }
     notifyListeners();
   }
 
@@ -508,9 +501,6 @@ class ChatListViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ============================================================
-  // Pin / Unpin (atomic using transaction on user's chat doc)
-  // ============================================================
   Future<void> togglePin(String chatId) async {
     final uid = currentUid;
     if (uid == null) throw Exception('Not logged in');
@@ -537,13 +527,12 @@ class ChatListViewModel extends ChangeNotifier {
         });
       });
 
-      // optimistic local update - reflect pinned flip and update lastUpdated locally
-      final idx = _chats.indexWhere((c) => c.id == chatId);
+      final idx = _cachedChats.indexWhere((c) => c.id == chatId);
       if (idx >= 0) {
-        final old = _chats[idx];
+        final old = _cachedChats[idx];
         final updated = old.copyWith(pinned: !old.pinned, lastUpdated: Timestamp.now());
         _chatMap[chatId] = updated;
-        _rebuildSortedList();
+        _rebuildSortedListAndNotify();
       }
       selectedIds.clear();
       errorMessage = null;
@@ -555,9 +544,6 @@ class ChatListViewModel extends ChangeNotifier {
     }
   }
 
-  // ============================================================
-  // Archive selected or single chat (per-user)
-  // ============================================================
   Future<void> archiveChats({List<String>? chatIds}) async {
     final uid = currentUid;
     if (uid == null) throw Exception('Not logged in');
@@ -576,7 +562,6 @@ class ChatListViewModel extends ChangeNotifier {
       }
       await batch.commit();
 
-      // local update: remove from map if we're not showing archived
       for (final id in ids) {
         final existing = _chatMap[id];
         if (existing != null) {
@@ -585,7 +570,7 @@ class ChatListViewModel extends ChangeNotifier {
           if (!_includeArchived) _chatMap.remove(id);
         }
       }
-      _rebuildSortedList();
+      _rebuildSortedListAndNotify();
       selectedIds.removeAll(ids);
       errorMessage = null;
     } catch (e) {
@@ -596,10 +581,6 @@ class ChatListViewModel extends ChangeNotifier {
     }
   }
 
-  // ============================================================
-  // Delete chats (local-only documents under users/{uid}/chats),
-  // This does NOT delete the conversation document itself (server-level).
-  // ============================================================
   Future<void> deleteChats({List<String>? chatIds}) async {
     final uid = currentUid;
     if (uid == null) throw Exception('Not logged in');
@@ -621,7 +602,7 @@ class ChatListViewModel extends ChangeNotifier {
       for (final id in ids) {
         _chatMap.remove(id);
       }
-      _rebuildSortedList();
+      _rebuildSortedListAndNotify();
       selectedIds.removeAll(ids);
       errorMessage = null;
     } catch (e) {
@@ -632,9 +613,6 @@ class ChatListViewModel extends ChangeNotifier {
     }
   }
 
-  // ============================================================
-  // Mark chat as read (set unreadCount=0 for this user's chat doc)
-  // ============================================================
   Future<void> markAsRead(String chatId) async {
     final uid = currentUid;
     if (uid == null) throw Exception('Not logged in');
@@ -643,13 +621,11 @@ class ChatListViewModel extends ChangeNotifier {
 
     try {
       await docRef.update({'unreadCount': 0});
-      // local update
-      final idx = _chats.indexWhere((c) => c.id == chatId);
+      final idx = _cachedChats.indexWhere((c) => c.id == chatId);
       if (idx >= 0) {
-        final updated = _chats[idx].copyWith(unreadCount: 0);
+        final updated = _cachedChats[idx].copyWith(unreadCount: 0);
         _chatMap[chatId] = updated;
-        _rebuildSortedList();
-        notifyListeners();
+        _rebuildSortedListAndNotify();
       }
     } catch (e) {
       errorMessage = e.toString();
@@ -657,38 +633,26 @@ class ChatListViewModel extends ChangeNotifier {
     }
   }
 
-  // ============================================================
-  // Search (client-side). For large scale, push to server-side search.
-  // ============================================================
   void setQuery(String q) {
     _query = q.trim();
     notifyListeners();
   }
 
-  // Toggle whether archived chats are included in the list and re-init stream
   Future<void> setIncludeArchived(bool include) async {
-    if (_includeArchived == include) return;
+    if (_includeArchived == include) {
+      return;
+    }
     _includeArchived = include;
     await refresh();
   }
 
-  // ============================================================
-  // Utility: find ChatSummary by id
-  // ============================================================
-  ChatSummary? findById(String id) {
-    return _chatMap[id];
-  }
+  ChatSummary? findById(String id) => _chatMap[id];
 
-  // ============================================================
-  // Optionally allow external code to push updates (e.g., when new message arrives)
-  // This will merge and reorder the local list appropriately.
-  // ============================================================
   void mergeIncomingChatSummary(ChatSummary summary) {
     final existing = _chatMap[summary.id];
     if (existing == null || _isDifferent(existing, summary)) {
       _chatMap[summary.id] = summary;
-      _rebuildSortedList();
-      notifyListeners();
+      _rebuildSortedListAndNotify();
     }
   }
 
@@ -696,6 +660,10 @@ class ChatListViewModel extends ChangeNotifier {
   void dispose() {
     _sub?.cancel();
     _conversationsSub?.cancel();
+    for (final s in _msgSubs.values) {
+      s.cancel();
+    }
+    _msgSubs.clear();
     super.dispose();
   }
 }
