@@ -1,4 +1,4 @@
-// chat_list_viewmodel.dart
+// lib/features/chat/viewmodel/chat_list_viewmodel.dart
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -227,7 +227,8 @@ class ChatListViewModel extends ChangeNotifier {
       });
 
       // Listen to conversations that include current user (no orderBy to avoid index issues)
-      _conversationsSub = _firestore.collection('conversations').where('members', arrayContains: uid).snapshots().listen((snap) {
+      _conversationsSub =
+          _firestore.collection('conversations').where('members', arrayContains: uid).snapshots().listen((snap) {
         for (final change in snap.docChanges) {
           final doc = change.doc;
           final convId = doc.id;
@@ -373,7 +374,12 @@ class ChatListViewModel extends ChangeNotifier {
     _convCache.remove(convId);
   }
 
-  Future<void> _mergeAndPersistSummaryFromConv(String convId, Map<String, dynamic>? convData, QueryDocumentSnapshot<Map<String, dynamic>>? mdoc) async {
+  /// MAIN MERGE / DEDUP LOGIC
+  /// If a conversation represents an otherId that already exists in _chatMap
+  /// (i.e. a duplicate conversation id for the same person), merge into the
+  /// existing per-user chat doc instead of creating a new UI entry.
+  Future<void> _mergeAndPersistSummaryFromConv(
+      String convId, Map<String, dynamic>? convData, QueryDocumentSnapshot<Map<String, dynamic>>? mdoc) async {
     final uid = currentUid;
     if (uid == null) return;
 
@@ -395,6 +401,7 @@ class ChatListViewModel extends ChangeNotifier {
         if (rawTs is Timestamp) lastMessageTs = rawTs;
       }
 
+      // Resolve display name
       String displayName = otherId;
       if (otherId.isNotEmpty) {
         displayName = await _getUserDisplayName(otherId) ?? otherId;
@@ -438,6 +445,55 @@ class ChatListViewModel extends ChangeNotifier {
         otherPublicId: otherPublicId,
       );
 
+      // DEDUP: if otherId exists already under a different chat id, merge into existing
+      if (!isGroup && otherId.isNotEmpty) {
+        final existingByOther = _findExistingByOtherId(otherId);
+        if (existingByOther != null && existingByOther.id != convId) {
+          // choose existing id as canonical for UI (keep per-user prefs)
+          final existingId = existingByOther.id;
+          final existing = existingByOther;
+
+          // pick the newest lastUpdated between existing and new
+          final chosenLastUpdated = lastMessageTs.millisecondsSinceEpoch > existing.lastUpdated.millisecondsSinceEpoch
+              ? lastMessageTs
+              : existing.lastUpdated;
+
+          final merged = existing.copyWith(
+            lastMessage: lastMessageText.isNotEmpty ? lastMessageText : existing.lastMessage,
+            lastUpdated: chosenLastUpdated,
+          );
+
+          _chatMap[existingId] = merged;
+          _rebuildSortedListAndNotify();
+
+          // Persist merge into users/{uid}/chats/{existingId}
+          try {
+            await _firestore.collection('users').doc(uid).collection('chats').doc(existingId).set({
+              'title': merged.title,
+              'isGroup': merged.isGroup,
+              'lastMessage': merged.lastMessage,
+              'lastUpdated': merged.lastUpdated,
+              'unreadCount': merged.unreadCount,
+              'pinned': merged.pinned,
+              'archived': merged.archived,
+              'otherPublicId': merged.otherPublicId,
+            }, SetOptions(merge: true));
+          } catch (e) {
+            debugPrint('[ChatListVM] failed to persist merged users chat $existingId: $e');
+          }
+
+          // Try to delete the duplicate per-user chat doc (best-effort)
+          try {
+            await _firestore.collection('users').doc(uid).collection('chats').doc(convId).delete();
+          } catch (_) {
+            // ignore delete failure (rules/permissions)
+          }
+
+          return; // merged -> don't add convId as a new separate entry
+        }
+      }
+
+      // Normal path: either group chat or no existing collision -> add/replace convId
       final existing = _chatMap[convId];
       if (existing == null || _isDifferent(existing, summary)) {
         _chatMap[convId] = summary;
@@ -462,6 +518,14 @@ class ChatListViewModel extends ChangeNotifier {
     } catch (e) {
       debugPrint('[ChatListVM] merge error for $convId: $e');
     }
+  }
+
+  // find existing summary for the same otherPublicId (only for 1:1)
+  ChatSummary? _findExistingByOtherId(String otherId) {
+    for (final s in _chatMap.values) {
+      if (!s.isGroup && s.otherPublicId == otherId) return s;
+    }
+    return null;
   }
 
   Future<String?> _getUserDisplayName(String uid) async {

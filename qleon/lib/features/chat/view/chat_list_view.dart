@@ -1,4 +1,4 @@
-// chat_list_view.dart
+// lib/features/chat/view/chat_list_view.dart
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter/services.dart';
@@ -50,6 +50,7 @@ class _ChatListViewState extends State<ChatListView> {
 
   void _onSearchChanged() {
     vm.setQuery(_searchController.text.trim());
+    setState(() {}); // update search icon/title
   }
 
   Future<bool?> _showConfirmSheet({
@@ -71,7 +72,12 @@ class _ChatListViewState extends State<ChatListView> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)))),
+                Center(
+                    child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10)),
+                )),
                 const SizedBox(height: 12),
                 Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 8),
@@ -170,20 +176,22 @@ class _ChatListViewState extends State<ChatListView> {
     return AppBar(
       backgroundColor: Colors.white,
       elevation: 0,
-      title: _searchController.text.isNotEmpty ? SizedBox(
-        height: 40,
-        child: TextField(
-          controller: _searchController,
-          autofocus: true,
-          decoration: const InputDecoration(
-            hintText: 'Search conversations',
-            border: OutlineInputBorder(borderSide: BorderSide.none),
-            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 0),
-            filled: true,
-            fillColor: Colors.white,
-          ),
-        ),
-      ) : const Text('Qleon', style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF111827))),
+      title: _searchController.text.isNotEmpty
+          ? SizedBox(
+              height: 40,
+              child: TextField(
+                controller: _searchController,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  hintText: 'Search conversations',
+                  border: OutlineInputBorder(borderSide: BorderSide.none),
+                  contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+                  filled: true,
+                  fillColor: Colors.white,
+                ),
+              ),
+            )
+          : const Text('Qleon', style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF111827))),
       actions: [
         IconButton(
           icon: Icon(_searchController.text.isNotEmpty ? Icons.close : Icons.search, color: const Color(0xFF374151)),
@@ -202,14 +210,7 @@ class _ChatListViewState extends State<ChatListView> {
           onSelected: (value) {
             switch (value) {
               case _MenuAction.archived:
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    // ArchiveView should read archived chats itself in production;
-                    // provide a safe callback to refresh the list when user returns.
-                    builder: (_) => ArchiveView<dynamic>(archivedChats: const [], onUnarchive: (item) => vm.refresh()),
-                  ),
-                );
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const ArchiveView()));
                 break;
               case _MenuAction.settings:
                 Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsView()));
@@ -227,8 +228,8 @@ class _ChatListViewState extends State<ChatListView> {
 
   PreferredSizeWidget _buildSelectionAppBar() {
     final single = vm.selectedIds.length == 1;
-    final firstId = vm.selectedIds.isNotEmpty ? vm.selectedIds.first : '';
-    final first = vm.findById(firstId);
+    final String? firstId = vm.selectedIds.isNotEmpty ? vm.selectedIds.first : null;
+    final first = firstId == null ? null : vm.findById(firstId);
     return AppBar(
       backgroundColor: Colors.white,
       elevation: 1,
@@ -271,7 +272,7 @@ class _ChatListViewState extends State<ChatListView> {
                               physics: const AlwaysScrollableScrollPhysics(),
                               padding: const EdgeInsets.all(40),
                               children: [
-                                Icon(Icons.chat_bubble_outline, size: 64, color: Colors.grey.withAlpha((0.4 * 255).round())),
+                                Icon(Icons.chat_bubble_outline, size: 64, color: Colors.grey.withOpacity(0.4)),
                                 const SizedBox(height: 16),
                                 const Text('No conversations', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey)),
                               ],
@@ -301,13 +302,13 @@ class _ChatListViewState extends State<ChatListView> {
                                       alignment: Alignment.centerLeft,
                                       padding: const EdgeInsets.only(left: 18),
                                       decoration: BoxDecoration(
-                                          color: Colors.green.withAlpha((0.08 * 255).round()), borderRadius: BorderRadius.circular(18)),
+                                          color: Colors.green.withOpacity(0.08), borderRadius: BorderRadius.circular(18)),
                                       child: const Icon(Icons.archive, color: Colors.green),
                                     ),
                                     secondaryBackground: Container(
                                       alignment: Alignment.centerRight,
                                       padding: const EdgeInsets.only(right: 18),
-                                      decoration: BoxDecoration(color: Colors.red.withAlpha((0.08 * 255).round()), borderRadius: BorderRadius.circular(18)),
+                                      decoration: BoxDecoration(color: Colors.red.withOpacity(0.08), borderRadius: BorderRadius.circular(18)),
                                       child: const Icon(Icons.delete, color: Colors.red),
                                     ),
                                     confirmDismiss: (dir) async {
@@ -322,19 +323,18 @@ class _ChatListViewState extends State<ChatListView> {
                                     child: AnimatedContainer(
                                       duration: const Duration(milliseconds: 180),
                                       decoration: BoxDecoration(
-                                        color: isSelected ? Colors.blue.withAlpha((0.12 * 255).round()) : Colors.white,
+                                        color: isSelected ? Colors.blue.withOpacity(0.12) : Colors.white,
                                         borderRadius: BorderRadius.circular(18),
-                                        boxShadow: [BoxShadow(color: Colors.black.withAlpha((0.04 * 255).round()), blurRadius: 12, offset: const Offset(0, 4))],
+                                        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 12, offset: const Offset(0, 4))],
                                       ),
                                       child: InkWell(
                                         borderRadius: BorderRadius.circular(18),
-                                        splashColor: Colors.blue.withAlpha((0.12 * 255).round()),
-                                        highlightColor: Colors.blue.withAlpha((0.06 * 255).round()),
+                                        splashColor: Colors.blue.withOpacity(0.12),
+                                        highlightColor: Colors.blue.withOpacity(0.06),
                                         onTap: () {
                                           if (model.selectionMode) {
                                             model.toggleSelection(chat.id);
                                           } else {
-                                            // Use conversationId = chat.id
                                             _openChatByConversationId(chat.id, chat.title, chat.isGroup);
                                           }
                                         },
