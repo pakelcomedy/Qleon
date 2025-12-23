@@ -5,6 +5,7 @@
 //  - normalize to canonical uidA_uidB when possible
 //  - listen to canonical and legacy conversation docs and merge messages in-memory
 //  - optimistic UI and safe parsing
+//  - dedupe using fingerprint and remove legacy listener if it only produces duplicates
 
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -72,8 +73,17 @@ class ChatRoomViewModel extends ChangeNotifier {
   bool isSending = false;
   String? errorMessage;
 
-  // internal map to merge messages from multiple listeners, key = msgId
+  // internal map to merge messages from multiple listeners, key = msgId (chosen canonical id)
   final Map<String, ChatMessage> _messagesMap = {};
+
+  // fingerprint (sender_ts_text) -> chosenDocId
+  final Map<String, String> _fingerprintIndex = {};
+
+  // docId -> fingerprint (reverse map) to allow updates/removals
+  final Map<String, String> _idToFingerprint = {};
+
+  // legacy duplicate counters: convId -> consecutive duplicate-only snapshot count
+  final Map<String, int> _legacyDuplicateCounter = {};
 
   ChatRoomViewModel({required this.conversationId});
 
@@ -171,6 +181,9 @@ class ChatRoomViewModel extends ChangeNotifier {
   Future<void> _startListeners({required String canonicalId, String? legacyId}) async {
     // clear previous map & messages
     _messagesMap.clear();
+    _fingerprintIndex.clear();
+    _idToFingerprint.clear();
+    _legacyDuplicateCounter.clear();
     messages = [];
     isLoading = true;
     notifyListeners();
@@ -178,7 +191,7 @@ class ChatRoomViewModel extends ChangeNotifier {
     // canonical listener
     final collRef = _firestore.collection('conversations').doc(canonicalId).collection('messages');
     _sub = collRef.orderBy('createdAt', descending: false).snapshots().listen((snap) {
-      _applySnapshotToMap(snap);
+      _applySnapshotToMap(snap, convId: canonicalId, isLegacy: false);
     }, onError: (e, st) {
       errorMessage = e.toString();
       isLoading = false;
@@ -190,7 +203,7 @@ class ChatRoomViewModel extends ChangeNotifier {
     if (legacyId != null && legacyId.isNotEmpty && legacyId != canonicalId) {
       final legacyRef = _firestore.collection('conversations').doc(legacyId).collection('messages');
       _legacySub = legacyRef.orderBy('createdAt', descending: false).snapshots().listen((snap) {
-        _applySnapshotToMap(snap);
+        _applySnapshotToMap(snap, convId: legacyId, isLegacy: true);
       }, onError: (e, st) {
         // non-fatal: legacy may not exist
         debugPrint('[ChatVM] legacy listener error for $legacyId: $e');
@@ -201,31 +214,113 @@ class ChatRoomViewModel extends ChangeNotifier {
     }
   }
 
-  void _applySnapshotToMap(QuerySnapshot snap) {
+  void _applySnapshotToMap(QuerySnapshot snap, {required String convId, required bool isLegacy}) {
     var changed = false;
+    var novelFound = false;
+
     for (final doc in snap.docs) {
       final cm = ChatMessage.fromDoc(doc);
-      final prev = _messagesMap[cm.id];
-      // replace or insert
-      if (prev == null || prev.createdAt.millisecondsSinceEpoch != cm.createdAt.millisecondsSinceEpoch || prev.text != cm.text || prev.isDeleted != cm.isDeleted) {
-        _messagesMap[cm.id] = cm;
-        changed = true;
+      final fp = _makeFingerprint(cm);
+
+      // if we already have an entry with same doc id -> update it and update fingerprint mapping
+      if (_messagesMap.containsKey(cm.id)) {
+        final prev = _messagesMap[cm.id]!;
+        final prevFp = _idToFingerprint[cm.id];
+        // if content/timestamp changed, update map
+        if (prev.createdAt.millisecondsSinceEpoch != cm.createdAt.millisecondsSinceEpoch || prev.text != cm.text || prev.isDeleted != cm.isDeleted) {
+          _messagesMap[cm.id] = cm;
+          changed = true;
+        }
+        // update fingerprint map if changed
+        if (prevFp != fp) {
+          if (prevFp != null) _fingerprintIndex.remove(prevFp);
+          _fingerprintIndex[fp] = cm.id;
+          _idToFingerprint[cm.id] = fp;
+        }
+        // this doc id existed so it's not 'novel' in sense of fingerprint; but it could be changed -> treat as changed already
+        continue;
+      }
+
+      // If fingerprint already maps to an existing id -> treat them as same message, update that existing entry
+      if (_fingerprintIndex.containsKey(fp)) {
+        final existingId = _fingerprintIndex[fp]!;
+        final existing = _messagesMap[existingId];
+        if (existing == null) {
+          // mapping stale; replace mapping to this doc id
+          _messagesMap[cm.id] = cm;
+          _fingerprintIndex[fp] = cm.id;
+          _idToFingerprint[cm.id] = fp;
+          changed = true;
+          novelFound = true;
+          continue;
+        }
+
+        // We already have a canonical doc id for this fingerprint.
+        // Prefer to keep the earlier doc id (existingId). Update its content if incoming doc is newer or different.
+        final shouldReplaceExisting =
+            cm.createdAt.millisecondsSinceEpoch > existing.createdAt.millisecondsSinceEpoch || cm.text != existing.text || cm.isDeleted != existing.isDeleted;
+        if (shouldReplaceExisting) {
+          _messagesMap[existingId] = cm;
+          _idToFingerprint[existingId] = fp;
+          changed = true;
+        }
+        // Do not add cm.id to _messagesMap to avoid duplicate entry.
+        continue;
+      }
+
+      // New fingerprint & new doc id -> insert
+      _messagesMap[cm.id] = cm;
+      _fingerprintIndex[fp] = cm.id;
+      _idToFingerprint[cm.id] = fp;
+      changed = true;
+      novelFound = true;
+    }
+
+    // Legacy listener heuristic: if legacy snapshots repeatedly produce NO novel messages, cancel legacy listener
+    if (isLegacy) {
+      final cnt = _legacyDuplicateCounter[convId] ?? 0;
+      if (!novelFound) {
+        final next = cnt + 1;
+        _legacyDuplicateCounter[convId] = next;
+        if (next >= 2) {
+          // stop legacy listener - canonical should handle messages going forward
+          debugPrint('[ChatVM] legacy listener $convId produced only duplicates $next times - cancelling legacy listener');
+          _cancelLegacyListener(convId);
+        }
+      } else {
+        // reset counter if we saw a novel message
+        _legacyDuplicateCounter[convId] = 0;
       }
     }
+
     if (changed) {
-      // rebuild list sorted by createdAt ascending
-      final list = _messagesMap.values.toList()
-        ..sort((a, b) => a.createdAt.toDate().millisecondsSinceEpoch.compareTo(b.createdAt.toDate().millisecondsSinceEpoch));
-      messages = list;
+      _rebuildMessagesFromMap();
       isLoading = false;
       notifyListeners();
     } else {
       if (isLoading) {
-        // first empty snapshot case
         isLoading = false;
         notifyListeners();
       }
     }
+  }
+
+  String _makeFingerprint(ChatMessage m) {
+    // normalize text whitespace to avoid tiny variations creating new fingerprint.
+    final normalizedText = (m.text).trim();
+    return '${m.senderId}_${m.createdAt.millisecondsSinceEpoch}_$normalizedText';
+  }
+
+  Future<void> _cancelLegacyListener(String legacyConvId) async {
+    if (_legacySub == null) return;
+    try {
+      await _legacySub!.cancel();
+    } catch (_) {}
+    _legacySub = null;
+    // remove duplicate counter entry
+    _legacyDuplicateCounter.remove(legacyConvId);
+    // we also remove fingerprint mappings that point to documents under legacyConvId
+    // (best-effort) - this is optional, keep safe: do not delete messagesMap entries; they remain.
   }
 
   /// Try to resolve possibly publicId (like "0xABCD") to uid.
@@ -307,6 +402,18 @@ class ChatRoomViewModel extends ChangeNotifier {
     isSending = true;
     notifyListeners();
 
+    // ensure conversationId is canonical (try to resolve parts that look like publicId)
+    final parts = conversationId.split('_');
+    if (parts.length == 2 && (parts[0].startsWith('0x') || parts[1].startsWith('0x'))) {
+      final r0 = await _resolveToUidIfNeeded(parts[0]) ?? parts[0];
+      final r1 = await _resolveToUidIfNeeded(parts[1]) ?? parts[1];
+      final sorted = [r0, r1]..sort();
+      final canonical = '${sorted[0]}_${sorted[1]}';
+      if (canonical != conversationId) {
+        conversationId = canonical;
+      }
+    }
+
     final convRef = _firestore.collection('conversations').doc(conversationId);
     final msgRef = convRef.collection('messages').doc();
 
@@ -320,15 +427,18 @@ class ChatRoomViewModel extends ChangeNotifier {
       isLocal: true,
     );
 
-    // put into internal map & rebuild messages
+    // put into internal map & rebuild messages (also add fingerprint)
+    final fp = _makeFingerprint(local);
     _messagesMap[local.id] = local;
+    _fingerprintIndex[fp] = local.id;
+    _idToFingerprint[local.id] = fp;
     _rebuildMessagesFromMap();
 
     try {
       // Ensure conversation exists: add both members when possible.
-      final parts = conversationId.split('_');
-      if (parts.length == 2 && parts[0].isNotEmpty && parts[1].isNotEmpty) {
-        final other = (parts[0] == senderUid) ? parts[1] : parts[0];
+      final parts2 = conversationId.split('_');
+      if (parts2.length == 2 && parts2[0].isNotEmpty && parts2[1].isNotEmpty) {
+        final other = (parts2[0] == senderUid) ? parts2[1] : parts2[0];
         // If other looks like publicId, try to resolve it to uid before writing members
         String otherResolved = other;
         if (other.startsWith('0x')) {
@@ -351,6 +461,8 @@ class ChatRoomViewModel extends ChangeNotifier {
       // server copy will come through snapshots and replace local placeholder (same id)
     } catch (e) {
       // remove optimistic local message on failure
+      final prevFp = _idToFingerprint.remove(local.id);
+      if (prevFp != null) _fingerprintIndex.remove(prevFp);
       _messagesMap.remove(local.id);
       _rebuildMessagesFromMap();
       errorMessage = e.toString();
