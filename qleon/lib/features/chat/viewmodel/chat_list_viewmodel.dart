@@ -9,14 +9,14 @@ import 'package:flutter/foundation.dart';
 /// This maps to documents under: users/{uid}/chats/{chatId}
 class ChatSummary {
   final String id;
-  final String title; // display name or group title
+  final String title;
   final bool isGroup;
   final String lastMessage;
   final Timestamp lastUpdated;
   final int unreadCount;
   final bool pinned;
   final bool archived;
-  final String otherPublicId; // optional: public identity of the other user
+  final String otherPublicId; // could be uid or public id (0x...)
 
   ChatSummary({
     required this.id,
@@ -38,7 +38,6 @@ class ChatSummary {
     } else if (lu is int) {
       lastUpdated = Timestamp.fromMillisecondsSinceEpoch(lu);
     } else if (lu is String) {
-      // ISO string fallback
       try {
         final dt = DateTime.parse(lu);
         lastUpdated = Timestamp.fromDate(dt);
@@ -98,10 +97,7 @@ class ChatSummary {
   }
 }
 
-/// Production-ready ViewModel for ChatList
-/// - listens to users/{uid}/chats (persisted per-user summaries)
-/// - ALSO listens to conversations where current user is a member and attaches
-///   *one message listener per conversation* to receive realtime last-message updates.
+/// Production-ready ViewModel for ChatList with robust dedupe logic.
 class ChatListViewModel extends ChangeNotifier {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -128,9 +124,12 @@ class ChatListViewModel extends ChangeNotifier {
   bool _includeArchived = false;
   final Map<String, String> _userDisplayCache = {};
 
-  // helper caches & subscriptions per conversation to track last message realtime
+  // message-listener subscriptions per conversation id
   final Map<String, StreamSubscription<QuerySnapshot<Map<String, dynamic>>>> _msgSubs = {};
-  final Map<String, Map<String, dynamic>?> _convCache = {}; // allow nullable convo data
+  final Map<String, Map<String, dynamic>?> _convCache = {}; // conv metadata cache
+
+  // For dedupe: cache publicId -> uid resolution
+  final Map<String, String> _publicToUidCache = {};
 
   ChatListViewModel() {
     _init();
@@ -149,6 +148,9 @@ class ChatListViewModel extends ChangeNotifier {
   bool get selectionMode => selectedIds.isNotEmpty;
   bool get hasSelection => selectedIds.isNotEmpty;
 
+  // -----------------------
+  // Initialization / Listeners
+  // -----------------------
   Future<void> _init() async {
     final uid = currentUid;
     if (uid == null) {
@@ -165,7 +167,6 @@ class ChatListViewModel extends ChangeNotifier {
     try {
       await _sub?.cancel();
       await _conversationsSub?.cancel();
-      // cancel all message subs
       for (final s in _msgSubs.values) {
         await s.cancel();
       }
@@ -176,7 +177,7 @@ class ChatListViewModel extends ChangeNotifier {
       _lastDoc = null;
       hasMore = true;
 
-      // listen to per-user chat summaries (existing persisted view)
+      // per-user chat summaries listener (this is primary persisted source)
       Query<Map<String, dynamic>> baseQuery = _firestore
           .collection('users')
           .doc(uid)
@@ -189,7 +190,8 @@ class ChatListViewModel extends ChangeNotifier {
         baseQuery = baseQuery.where('archived', isEqualTo: false);
       }
 
-      _sub = baseQuery.snapshots().listen((snap) {
+      // NOTE: listener callback marked async so we can await dedupe helpers
+      _sub = baseQuery.snapshots().listen((snap) async {
         _lastDoc = snap.docs.isNotEmpty ? snap.docs.last : null;
         hasMore = snap.docs.length >= pageSize;
         var changed = false;
@@ -198,8 +200,33 @@ class ChatListViewModel extends ChangeNotifier {
           final id = change.doc.id;
           final data = change.doc.data();
           if (data == null) continue;
+
           if (change.type == DocumentChangeType.added || change.type == DocumentChangeType.modified) {
             final summary = ChatSummary.fromMap(id, data);
+
+            // STRONG DEDUPE: if this summary represents a 1:1 with otherPublicId
+            // and that other already exists under different id, merge instead of adding new.
+            if (!summary.isGroup && summary.otherPublicId.isNotEmpty) {
+              final existingByOther = await _findExistingByOtherIdAsync(summary.otherPublicId);
+              if (existingByOther != null && existingByOther.id != id) {
+                // Merge: prefer newest lastUpdated
+                final chosenLastUpdated = summary.lastUpdated.millisecondsSinceEpoch > existingByOther.lastUpdated.millisecondsSinceEpoch
+                    ? summary.lastUpdated
+                    : existingByOther.lastUpdated;
+                final merged = existingByOther.copyWith(
+                  lastMessage: summary.lastMessage.isNotEmpty ? summary.lastMessage : existingByOther.lastMessage,
+                  lastUpdated: chosenLastUpdated,
+                );
+                _chatMap[existingByOther.id] = merged;
+                // remove duplicate per-user doc (best-effort)
+                try {
+                  await _firestore.collection('users').doc(uid).collection('chats').doc(id).delete();
+                } catch (_) {}
+                changed = true;
+                continue; // skip adding this doc as separate entry
+              }
+            }
+
             final existing = _chatMap[id];
             if (existing == null || _isDifferent(existing, summary)) {
               _chatMap[id] = summary;
@@ -226,25 +253,21 @@ class ChatListViewModel extends ChangeNotifier {
         notifyListeners();
       });
 
-      // Listen to conversations that include current user (no orderBy to avoid index issues)
-      _conversationsSub =
-          _firestore.collection('conversations').where('members', arrayContains: uid).snapshots().listen((snap) {
+      // Also listen to conversations collection for realtime last-message (to cover cases where
+      // server-side fan-out to users/{uid}/chats isn't in place)
+      _conversationsSub = _firestore.collection('conversations').where('members', arrayContains: uid).snapshots().listen((snap) {
         for (final change in snap.docChanges) {
           final doc = change.doc;
           final convId = doc.id;
           final convData = doc.data();
-          // cache conv metadata (note: doc.data() may be null)
           _convCache[convId] = convData;
           if (change.type == DocumentChangeType.removed) {
-            // cancel message listener + remove from map
             _cancelMessageListener(convId);
             if (_chatMap.containsKey(convId)) {
               _chatMap.remove(convId);
               _rebuildSortedListAndNotify();
             }
           } else {
-            // On added/modified: ensure we have a message listener for this conversation,
-            // and let message listener drive the lastMessage updates (realtime).
             _ensureMessageListener(convId, convData);
           }
         }
@@ -343,17 +366,15 @@ class ChatListViewModel extends ChangeNotifier {
     }
   }
 
-  // Ensure there's a single listener for the last message of convId
+  // -----------------------
+  // Conversation -> last message listener helpers
+  // -----------------------
   void _ensureMessageListener(String convId, Map<String, dynamic>? convData) {
-    if (_msgSubs.containsKey(convId)) {
-      // already listening
-      return;
-    }
+    if (_msgSubs.containsKey(convId)) return;
 
     final msgsRef = _firestore.collection('conversations').doc(convId).collection('messages');
     final sub = msgsRef.orderBy('createdAt', descending: true).limit(1).snapshots().listen((snap) async {
       if (snap.docs.isEmpty) {
-        // no messages yet -> still create summary from convData
         await _mergeAndPersistSummaryFromConv(convId, convData, null);
         return;
       }
@@ -375,9 +396,6 @@ class ChatListViewModel extends ChangeNotifier {
   }
 
   /// MAIN MERGE / DEDUP LOGIC
-  /// If a conversation represents an otherId that already exists in _chatMap
-  /// (i.e. a duplicate conversation id for the same person), merge into the
-  /// existing per-user chat doc instead of creating a new UI entry.
   Future<void> _mergeAndPersistSummaryFromConv(
       String convId, Map<String, dynamic>? convData, QueryDocumentSnapshot<Map<String, dynamic>>? mdoc) async {
     final uid = currentUid;
@@ -401,7 +419,6 @@ class ChatListViewModel extends ChangeNotifier {
         if (rawTs is Timestamp) lastMessageTs = rawTs;
       }
 
-      // Resolve display name
       String displayName = otherId;
       if (otherId.isNotEmpty) {
         displayName = await _getUserDisplayName(otherId) ?? otherId;
@@ -445,19 +462,15 @@ class ChatListViewModel extends ChangeNotifier {
         otherPublicId: otherPublicId,
       );
 
-      // DEDUP: if otherId exists already under a different chat id, merge into existing
+      // STRONG DEDUPE: if another existing chat represents the same other user, merge into it
       if (!isGroup && otherId.isNotEmpty) {
-        final existingByOther = _findExistingByOtherId(otherId);
+        final existingByOther = await _findExistingByOtherIdAsync(otherId);
         if (existingByOther != null && existingByOther.id != convId) {
-          // choose existing id as canonical for UI (keep per-user prefs)
           final existingId = existingByOther.id;
           final existing = existingByOther;
-
-          // pick the newest lastUpdated between existing and new
           final chosenLastUpdated = lastMessageTs.millisecondsSinceEpoch > existing.lastUpdated.millisecondsSinceEpoch
               ? lastMessageTs
               : existing.lastUpdated;
-
           final merged = existing.copyWith(
             lastMessage: lastMessageText.isNotEmpty ? lastMessageText : existing.lastMessage,
             lastUpdated: chosenLastUpdated,
@@ -466,7 +479,7 @@ class ChatListViewModel extends ChangeNotifier {
           _chatMap[existingId] = merged;
           _rebuildSortedListAndNotify();
 
-          // Persist merge into users/{uid}/chats/{existingId}
+          // persist merged to users/{uid}/chats/{existingId}
           try {
             await _firestore.collection('users').doc(uid).collection('chats').doc(existingId).set({
               'title': merged.title,
@@ -482,18 +495,16 @@ class ChatListViewModel extends ChangeNotifier {
             debugPrint('[ChatListVM] failed to persist merged users chat $existingId: $e');
           }
 
-          // Try to delete the duplicate per-user chat doc (best-effort)
+          // Best-effort delete duplicate per-user doc
           try {
             await _firestore.collection('users').doc(uid).collection('chats').doc(convId).delete();
-          } catch (_) {
-            // ignore delete failure (rules/permissions)
-          }
+          } catch (_) {}
 
-          return; // merged -> don't add convId as a new separate entry
+          return; // merged; stop
         }
       }
 
-      // Normal path: either group chat or no existing collision -> add/replace convId
+      // Normal path: add/replace convId entry
       final existing = _chatMap[convId];
       if (existing == null || _isDifferent(existing, summary)) {
         _chatMap[convId] = summary;
@@ -520,12 +531,59 @@ class ChatListViewModel extends ChangeNotifier {
     }
   }
 
-  // find existing summary for the same otherPublicId (only for 1:1)
-  ChatSummary? _findExistingByOtherId(String otherId) {
+  // -----------------------
+  // Dedup helpers: try to find existing ChatSummary for same otherId
+  // -----------------------
+  Future<ChatSummary?> _findExistingByOtherIdAsync(String otherId) async {
+    // quick pass: exact match on otherPublicId in cache
     for (final s in _chatMap.values) {
-      if (!s.isGroup && s.otherPublicId == otherId) return s;
+      if (!s.isGroup && s.otherPublicId.isNotEmpty && s.otherPublicId == otherId) return s;
     }
+
+    // if otherId looks like publicId (0x...), try to resolve to uid and compare
+    if (otherId.startsWith('0x')) {
+      final resolvedUid = await _resolvePublicToUidCached(otherId);
+      if (resolvedUid != null) {
+        for (final s in _chatMap.values) {
+          if (!s.isGroup) {
+            // compare s.otherPublicId to resolvedUid or to publicId
+            if (s.otherPublicId == resolvedUid || s.otherPublicId == otherId) return s;
+          }
+        }
+      }
+    } else {
+      // otherId is likely a uid; sometimes stored otherPublicId may be a publicId -> resolve and compare
+      for (final s in _chatMap.values) {
+        if (!s.isGroup) {
+          if (s.otherPublicId == otherId) return s;
+          if (s.otherPublicId.startsWith('0x')) {
+            final resolved = await _resolvePublicToUidCached(s.otherPublicId);
+            if (resolved != null && resolved == otherId) return s;
+          }
+        }
+      }
+    }
+
     return null;
+  }
+
+  Future<String?> _resolvePublicToUidCached(String publicId) async {
+    if (_publicToUidCache.containsKey(publicId)) return _publicToUidCache[publicId];
+    try {
+      final q = await _firestore.collection('users').where('name', isEqualTo: publicId).limit(1).get();
+      if (q.docs.isNotEmpty) {
+        final d = q.docs.first.data();
+        final uid = (d['uid'] as String?) ?? q.docs.first.id;
+        _publicToUidCache[publicId] = uid;
+        return uid;
+      }
+      // cache negative result to avoid repeated queries
+      _publicToUidCache[publicId] = '';
+      return null;
+    } catch (e) {
+      debugPrint('[ChatListVM] _resolvePublicToUidCached error: $e');
+      return null;
+    }
   }
 
   Future<String?> _getUserDisplayName(String uid) async {
@@ -545,7 +603,9 @@ class ChatListViewModel extends ChangeNotifier {
     }
   }
 
-  // Selection helpers and rest kept same as before...
+  // -----------------------
+  // Selection / CRUD helpers (unchanged, except local map maintenance)
+  // -----------------------
   void startSelection(String chatId) {
     selectedIds.add(chatId);
     notifyListeners();
@@ -703,9 +763,7 @@ class ChatListViewModel extends ChangeNotifier {
   }
 
   Future<void> setIncludeArchived(bool include) async {
-    if (_includeArchived == include) {
-      return;
-    }
+    if (_includeArchived == include) return;
     _includeArchived = include;
     await refresh();
   }

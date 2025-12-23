@@ -32,14 +32,13 @@ class AddContactViewModel extends ChangeNotifier {
   // last scanned uid extracted from QR (useful so UI/caller doesn't need to re-parse)
   String? lastScannedUid;
 
+  // cache publicId -> uid resolution
+  final Map<String, String?> _publicToUidCache = {};
+
   AddContactViewModel();
 
   /// Process raw scanned string.
   /// Returns a ChatContact if successful, otherwise throws.
-  ///
-  /// NOTE: This method only parses the QR and enriches contact from `users` doc.
-  /// To get or create a conversation id between current user and scanned user,
-  /// call `createOrGetConversationId(lastScannedUid!)` afterwards (or pass uid directly).
   Future<ChatContact> processScannedPayload(String raw) async {
     isProcessing = true;
     errorMessage = null;
@@ -126,15 +125,13 @@ class AddContactViewModel extends ChangeNotifier {
 
   /// Create or return existing conversation id for current user and [otherUid].
   ///
-  /// Strategy:
-  /// - Determine a deterministic conversation id by lexicographically sorting the two UIDs
-  ///   and joining them with an underscore. This prevents duplicate conversations for the same pair.
-  /// - Check if a conversation doc with that id exists. If not and [createIfMissing] is true,
-  ///   search for an existing conversation document that contains both members (to avoid duplicates),
-  ///   otherwise create a minimal conversation doc.
-  ///
-  /// Returns the conversation id (string).
-  Future<String> createOrGetConversationId(String otherUid, {bool createIfMissing = true}) async {
+  /// Improvements:
+  ///  - Accepts optional otherPublicId (public identity like "0x...") to detect duplicates
+  ///  - Checks users/{me}/chats for existing per-user summary first (fast)
+  ///  - If per-user summary is archived, will unarchive it and return that id (avoid creating new)
+  ///  - Searches conversations membership as fallback
+  ///  - Creates canonical conversation doc using a transaction to avoid races creating duplicates
+  Future<String> createOrGetConversationId(String otherUid, {String? otherPublicId, bool createIfMissing = true}) async {
     isProcessing = true;
     errorMessage = null;
     notifyListeners();
@@ -157,14 +154,41 @@ class AddContactViewModel extends ChangeNotifier {
       throw ArgumentError('Cannot create conversation with self');
     }
 
-    // make canonical conversation id (lexicographically sorted: "a_b")
-    final conversationId = _makeConversationId(myUid, otherUid);
+    // Normalize: if caller passed a publicId instead of uid, try resolve it
+    String resolvedOtherUid = otherUid;
+    if (otherUid.startsWith('0x')) {
+      final r = await _resolvePublicToUidCached(otherUid);
+      if (r != null && r.isNotEmpty) resolvedOtherUid = r;
+    }
+
+    // if otherPublicId not provided, derive a candidate public id from otherUid (if user doc exists)
+    String? resolvedOtherPublicId = otherPublicId;
+    if (resolvedOtherPublicId == null && !resolvedOtherUid.startsWith('0x')) {
+      try {
+        final snap = await _firestore.collection('users').doc(resolvedOtherUid).get();
+        if (snap.exists) {
+          resolvedOtherPublicId = (snap.data()?['name'] as String?) ?? resolvedOtherPublicId;
+        }
+      } catch (_) {}
+    }
+
+    // deterministic canonical id
+    final conversationId = _makeConversationId(myUid, resolvedOtherUid);
     final convRef = _firestore.collection('conversations').doc(conversationId);
 
     try {
-      // quick check canonical doc
-      final doc = await convRef.get();
-      if (doc.exists) {
+      // 1) Quick: check canonical per-user chat doc under users/{me}/chats/{conversationId}
+      final myChatDocRef = _firestore.collection('users').doc(myUid).collection('chats').doc(conversationId);
+      final myChatSnap = await myChatDocRef.get();
+      if (myChatSnap.exists) {
+        // if archived -> unarchive (user expects to resume chat with scanned contact)
+        final data = myChatSnap.data();
+        final archived = (data?['archived'] as bool?) ?? false;
+        if (archived) {
+          try {
+            await myChatDocRef.update({'archived': false, 'lastUpdated': FieldValue.serverTimestamp()});
+          } catch (_) {}
+        }
         lastConversationId = conversationId;
         lastConversationExists = true;
         isProcessing = false;
@@ -172,12 +196,64 @@ class AddContactViewModel extends ChangeNotifier {
         return conversationId;
       }
 
-      // If canonical doc not found, search for any conversation doc that has both members in 'members' array
-      final q = await _firestore.collection('conversations').where('members', arrayContains: myUid).get();
-      for (final d in q.docs) {
+      // 2) Strong dedupe: check users/{my}/chats for any doc that references otherPublicId or otherUid
+      // prefer query by exact otherPublicId if we have it
+      if (resolvedOtherPublicId != null && resolvedOtherPublicId.isNotEmpty) {
+        final q = await _firestore
+            .collection('users')
+            .doc(myUid)
+            .collection('chats')
+            .where('otherPublicId', isEqualTo: resolvedOtherPublicId)
+            .limit(1)
+            .get();
+        if (q.docs.isNotEmpty) {
+          final doc = q.docs.first;
+          // if archived -> unarchive
+          final d = doc.data();
+          final archived = (d['archived'] as bool?) ?? false;
+          if (archived) {
+            try {
+              await doc.reference.update({'archived': false, 'lastUpdated': FieldValue.serverTimestamp()});
+            } catch (_) {}
+          }
+          lastConversationId = doc.id;
+          lastConversationExists = true;
+          isProcessing = false;
+          notifyListeners();
+          return doc.id;
+        }
+      }
+
+      // also try by otherPublicId == resolvedOtherUid (sometimes otherPublicId stored as uid)
+      final q2 = await _firestore
+          .collection('users')
+          .doc(myUid)
+          .collection('chats')
+          .where('otherPublicId', isEqualTo: resolvedOtherUid)
+          .limit(1)
+          .get();
+      if (q2.docs.isNotEmpty) {
+        final doc = q2.docs.first;
+        final d = doc.data();
+        final archived = (d['archived'] as bool?) ?? false;
+        if (archived) {
+          try {
+            await doc.reference.update({'archived': false, 'lastUpdated': FieldValue.serverTimestamp()});
+          } catch (_) {}
+        }
+        lastConversationId = doc.id;
+        lastConversationExists = true;
+        isProcessing = false;
+        notifyListeners();
+        return doc.id;
+      }
+
+      // 3) Fallback: search conversations collection for any doc that contains both members (cheap limit)
+      // This is fallback and limits results to avoid large scans.
+      final qConv = await _firestore.collection('conversations').where('members', arrayContains: myUid).limit(50).get();
+      for (final d in qConv.docs) {
         final members = (d.data()['members'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [];
-        if (members.contains(myUid) && members.contains(otherUid)) {
-          // found existing doc with both members
+        if (members.contains(myUid) && members.contains(resolvedOtherUid)) {
           lastConversationId = d.id;
           lastConversationExists = true;
           isProcessing = false;
@@ -194,24 +270,62 @@ class AddContactViewModel extends ChangeNotifier {
         throw StateError('Conversation does not exist and createIfMissing is false');
       }
 
-      // create minimal conversation doc (merge so we don't overwrite random fields)
-      final now = FieldValue.serverTimestamp();
-      final conversationData = <String, dynamic>{
-        // store canonical id in doc if you like; doc.id already is canonical
-        'members': [myUid, otherUid],
-        'createdAt': now,
-        'lastMessage': null,
-        'lastUpdated': now,
-      };
+      // 4) Create canonical conversation using a transaction (atomic) to prevent race duplicates
+      final createdId = await _firestore.runTransaction<String?>((tx) async {
+        final fresh = await tx.get(convRef);
+        if (fresh.exists) {
+          // already created by other client in the meantime
+          return convRef.id;
+        }
 
-      // Use set with merge to be safe if doc appears between the earlier check and this set
-      await convRef.set(conversationData, SetOptions(merge: true));
+        // prepare conversation data
+        final now = FieldValue.serverTimestamp();
+        final conversationData = <String, dynamic>{
+          'members': [myUid, resolvedOtherUid],
+          'isGroup': false,
+          'createdAt': now,
+          'lastUpdated': now,
+        };
 
-      lastConversationId = conversationId;
-      lastConversationExists = true;
-      isProcessing = false;
-      notifyListeners();
-      return conversationId;
+        tx.set(convRef, conversationData, SetOptions(merge: true));
+        return convRef.id;
+      }, timeout: const Duration(seconds: 15)).catchError((e) => null);
+
+      if (createdId != null) {
+        lastConversationId = createdId;
+        lastConversationExists = true;
+
+        // Also try to ensure users/{my}/chats summary exists (best-effort)
+        try {
+          await _firestore.collection('users').doc(myUid).collection('chats').doc(createdId).set({
+            'title': (resolvedOtherPublicId ?? resolvedOtherUid),
+            'isGroup': false,
+            'lastMessage': null,
+            'lastUpdated': FieldValue.serverTimestamp(),
+            'unreadCount': 0,
+            'pinned': false,
+            'archived': false,
+            'otherPublicId': resolvedOtherPublicId ?? resolvedOtherUid,
+          }, SetOptions(merge: true));
+        } catch (_) {
+          // ignore per-user write failure (rules might prevent it)
+        }
+
+        isProcessing = false;
+        notifyListeners();
+        return createdId;
+      } else {
+        // transaction failure fallback: try to re-check canonical doc once more
+        final finalSnap = await convRef.get();
+        if (finalSnap.exists) {
+          lastConversationId = convRef.id;
+          lastConversationExists = true;
+          isProcessing = false;
+          notifyListeners();
+          return convRef.id;
+        }
+        throw StateError('Failed to create conversation');
+      }
     } on FirebaseException catch (e) {
       lastConversationId = null;
       lastConversationExists = false;
@@ -230,22 +344,17 @@ class AddContactViewModel extends ChangeNotifier {
   }
 
   /// Helper: deterministic conversation id (so same pair => same id)
-  /// Order UIDs lexicographically so A_B == B_A.
   String _makeConversationId(String a, String b) {
     final list = [a, b]..sort();
     return '${list[0]}_${list[1]}';
   }
 
   /// Try to decode QR from picked image path using MobileScannerController.analyzeImage
-  /// Not all versions/platforms support analyzeImage; wrap in try/catch.
   Future<String?> decodeQrFromImage(String imagePath) async {
     try {
-      // analyzeImage is available on some versions of mobile_scanner; this
-      // call may throw/no-op if not available — keep defensive.
       final result = await cameraController.analyzeImage(imagePath);
       if (result == null) return null;
 
-      // If result has barcodes property:
       try {
         final dynamic r = result;
         if (r is String) return r;
@@ -260,13 +369,35 @@ class AddContactViewModel extends ChangeNotifier {
           return barcode.rawValue as String?;
         }
       } catch (_) {
-        // fallback try toString()
         return result.toString();
       }
       return result.toString();
     } catch (e) {
-      // analyzeImage may not be implemented; return null so UI can show message
       debugPrint('[AddContactVM] decodeQrFromImage failed: $e');
+      return null;
+    }
+  }
+
+  /// Resolve a public identity (0x...) to uid with cache.
+  /// Returns null if not resolvable.
+  Future<String?> _resolvePublicToUidCached(String publicId) async {
+    if (_publicToUidCache.containsKey(publicId)) {
+      return _publicToUidCache[publicId] == '' ? null : _publicToUidCache[publicId];
+    }
+    try {
+      final q = await _firestore.collection('users').where('name', isEqualTo: publicId).limit(1).get();
+      if (q.docs.isNotEmpty) {
+        final doc = q.docs.first;
+        final uid = (doc.data()['uid'] as String?) ?? doc.id;
+        _publicToUidCache[publicId] = uid;
+        return uid;
+      } else {
+        _publicToUidCache[publicId] = '';
+        return null;
+      }
+    } catch (e) {
+      debugPrint('[AddContactVM] _resolvePublicToUidCached error: $e');
+      _publicToUidCache[publicId] = '';
       return null;
     }
   }

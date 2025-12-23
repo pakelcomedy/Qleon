@@ -7,7 +7,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 
 /// Simple contact model used by NewChatView & AddContactView
 class ChatContact {
-  final String publicId; // unique public identity (e.g. other user's uid)
+  final String publicId; // unique public identity (e.g. other user's uid or 0x..)
   final String displayName; // local alias
   final String publicStatus; // e.g. "Online" or "Last seen ..."
   final bool isOnline;
@@ -49,7 +49,7 @@ class ChatContact {
   }
 }
 
-/// ViewModel for NewChatView
+/// ViewModel for NewChatView with strong duplicate prevention.
 class NewChatViewModel extends ChangeNotifier {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -58,6 +58,9 @@ class NewChatViewModel extends ChangeNotifier {
   List<ChatContact> contacts = [];
   bool isLoading = true;
   String? errorMessage;
+
+  // cache publicId -> uid resolution to avoid repeated queries
+  final Map<String, String?> _publicToUidCache = {};
 
   NewChatViewModel() {
     _init();
@@ -103,7 +106,7 @@ class NewChatViewModel extends ChangeNotifier {
 
     try {
       await docRef.set(contact.toMap());
-      // local updates will be reflected by the listener; but optimistic update is okay:
+      // local updates will be reflected by the listener; optimistic update too:
       final existsIndex = contacts.indexWhere((c) => c.publicId == contact.publicId);
       if (existsIndex == -1) {
         contacts.insert(0, contact);
@@ -131,96 +134,239 @@ class NewChatViewModel extends ChangeNotifier {
   }
 
   /// Helper: deterministic conversation id so same pair -> same id
-  /// Order UIDs lexicographically so A_B == B_A.
+  /// Order identifiers lexicographically so A_B == B_A.
   String _makeConversationId(String a, String b) {
     final list = [a, b]..sort();
     return '${list[0]}_${list[1]}';
   }
 
-  /// Find existing conversation between current user and a contact (by contact.publicId).
-  /// If none exists, create a new conversation document and return its id.
-  ///
-  /// IMPORTANT: this uses a deterministic conversation id (uidA_uidB) so both sides point to the same doc.
+  /// Resolve a public identity (0x...) to uid with cache.
+  /// Returns null if not resolvable.
+  Future<String?> _resolvePublicToUidCached(String publicId) async {
+    if (_publicToUidCache.containsKey(publicId)) {
+      final cached = _publicToUidCache[publicId];
+      return (cached == '') ? null : cached;
+    }
+    try {
+      final q = await _firestore.collection('users').where('name', isEqualTo: publicId).limit(1).get();
+      if (q.docs.isNotEmpty) {
+        final doc = q.docs.first;
+        final uid = (doc.data()['uid'] as String?) ?? doc.id;
+        _publicToUidCache[publicId] = uid;
+        return uid;
+      } else {
+        _publicToUidCache[publicId] = '';
+        return null;
+      }
+    } catch (e) {
+      debugPrint('[NewChatVM] _resolvePublicToUidCached error: $e');
+      _publicToUidCache[publicId] = '';
+      return null;
+    }
+  }
+
+  /// Find existing conversation between current user and a contact (by contact.publicId),
+  /// or create a canonical one if none exists. Prevents duplicates aggressively:
+  /// - checks users/{me}/chats for existing per-user summary (by conversationId or otherPublicId)
+  /// - unarchives summary if archived
+  /// - searches conversations collection for membership match
+  /// - creates canonical conversation using transaction to avoid races
   Future<String> openOrCreateConversation(ChatContact contact) async {
     final uid = currentUid;
     if (uid == null) throw Exception('User not logged in');
-
     if (contact.publicId.isEmpty) throw ArgumentError('contact.publicId must not be empty');
 
-    final otherId = contact.publicId;
-
-    // Build canonical conversation id (deterministic)
-    final conversationId = _makeConversationId(uid, otherId);
-    final convRef = _firestore.collection('conversations').doc(conversationId);
+    isLoading = true;
+    errorMessage = null;
+    notifyListeners();
 
     try {
-      // 1) Check canonical doc existence first (fast)
-      final doc = await convRef.get();
-      if (doc.exists) {
+      // Resolve contact.publicId -> uid when necessary
+      String resolvedOther = contact.publicId;
+      if (contact.publicId.startsWith('0x')) {
+        final r = await _resolvePublicToUidCached(contact.publicId);
+        if (r != null && r.isNotEmpty) resolvedOther = r;
+      }
+
+      // Try to get a candidate public id for the other (useful when otherPublicId stored)
+      String? otherPublicId = contact.publicId;
+      if (!resolvedOther.startsWith('0x')) {
+        try {
+          final snap = await _firestore.collection('users').doc(resolvedOther).get();
+          if (snap.exists) {
+            otherPublicId = (snap.data()?['name'] as String?) ?? otherPublicId;
+          }
+        } catch (_) {}
+      }
+
+      // deterministic canonical conversation id
+      final conversationId = _makeConversationId(uid, resolvedOther);
+      final convRef = _firestore.collection('conversations').doc(conversationId);
+
+      // 1) Check users/{me}/chats/{conversationId} first
+      final myChatRef = _firestore.collection('users').doc(uid).collection('chats').doc(conversationId);
+      final myChatSnap = await myChatRef.get();
+      if (myChatSnap.exists) {
+        // if archived -> unarchive (user expects to resume chat)
+        final archived = (myChatSnap.data()?['archived'] as bool?) ?? false;
+        if (archived) {
+          try {
+            await myChatRef.update({'archived': false, 'lastUpdated': FieldValue.serverTimestamp()});
+          } catch (_) {}
+        }
+        isLoading = false;
+        notifyListeners();
         return conversationId;
       }
 
-      // 2) If canonical not present, search for any conversation that includes both members
-      // (useful if older conversations used random ids).
-      final query = await _firestore
-          .collection('conversations')
-          .where('members', arrayContains: uid)
-          .limit(50)
-          .get();
+      // 2) Strong dedupe: check users/{me}/chats for otherPublicId or resolvedOther
+      if (otherPublicId != null && otherPublicId.isNotEmpty) {
+        final q = await _firestore
+            .collection('users')
+            .doc(uid)
+            .collection('chats')
+            .where('otherPublicId', isEqualTo: otherPublicId)
+            .limit(1)
+            .get();
+        if (q.docs.isNotEmpty) {
+          final doc = q.docs.first;
+          final archived = (doc.data()['archived'] as bool?) ?? false;
+          if (archived) {
+            try {
+              await doc.reference.update({'archived': false, 'lastUpdated': FieldValue.serverTimestamp()});
+            } catch (_) {}
+          }
+          isLoading = false;
+          notifyListeners();
+          return doc.id;
+        }
+      }
 
-      for (final d in query.docs) {
-        final data = d.data();
-        final members = (data['members'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? <String>[];
-        if (members.contains(otherId)) {
-          // found existing conversation that includes the contact
+      // try also by otherPublicId == resolvedOther (sometimes stored as uid)
+      final q2 = await _firestore
+          .collection('users')
+          .doc(uid)
+          .collection('chats')
+          .where('otherPublicId', isEqualTo: resolvedOther)
+          .limit(1)
+          .get();
+      if (q2.docs.isNotEmpty) {
+        final doc = q2.docs.first;
+        final archived = (doc.data()['archived'] as bool?) ?? false;
+        if (archived) {
+          try {
+            await doc.reference.update({'archived': false, 'lastUpdated': FieldValue.serverTimestamp()});
+          } catch (_) {}
+        }
+        isLoading = false;
+        notifyListeners();
+        return doc.id;
+      }
+
+      // 3) Search conversations that contain both members (limit small to avoid big scans)
+      final convQuery = await _firestore.collection('conversations').where('members', arrayContains: uid).limit(50).get();
+      for (final d in convQuery.docs) {
+        final members = (d.data()['members'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? <String>[];
+        if (members.contains(resolvedOther)) {
+          isLoading = false;
+          notifyListeners();
           return d.id;
         }
       }
 
-      // 3) Not found -> create conversation using the deterministic id so both sides point here.
-      final createdAt = FieldValue.serverTimestamp();
-      final payload = {
-        'members': [uid, otherId],
-        'isGroup': false,
-        'createdAt': createdAt,
-        'lastUpdated': createdAt,
-      };
+      // 4) Not found -> create canonical conversation using transaction to avoid duplicate creation
+      final createdId = await _firestore.runTransaction<String?>((tx) async {
+        final fresh = await tx.get(convRef);
+        if (fresh.exists) {
+          return convRef.id;
+        }
 
-      // Use merge: true to be safe if doc gets created between get() and set()
-      await convRef.set(payload, SetOptions(merge: true));
-
-      // 4) create per-user chat summary for current user (and attempt for other user)
-      final myChatRef = _firestore.collection('users').doc(uid).collection('chats').doc(conversationId);
-      await myChatRef.set({
-        'title': contact.displayName,
-        'lastMessage': '',
-        'lastUpdated': FieldValue.serverTimestamp(),
-        'otherPublicId': contact.publicId,
-        'isGroup': false,
-        'pinned': false,
-        'archived': false,
-      }, SetOptions(merge: true));
-
-      // Trying to write to the other user's chat summary may be blocked by rules.
-      // Wrap in try/catch and ignore failure (server-side should handle fan-out ideally).
-      try {
-        final otherChatRef = _firestore.collection('users').doc(otherId).collection('chats').doc(conversationId);
-        await otherChatRef.set({
-          'title': (contact.displayName.isNotEmpty) ? contact.displayName : uid,
-          'lastMessage': '',
-          'lastUpdated': FieldValue.serverTimestamp(),
-          'otherPublicId': uid,
+        final now = FieldValue.serverTimestamp();
+        final payload = {
+          'members': [uid, resolvedOther],
           'isGroup': false,
-          'pinned': false,
-          'archived': false,
-        }, SetOptions(merge: true));
-      } catch (e) {
-        debugPrint('[NewChatVM] unable to write other user chat summary (may be expected): $e');
+          'createdAt': now,
+          'lastUpdated': now,
+        };
+
+        tx.set(convRef, payload, SetOptions(merge: true));
+        return convRef.id;
+      }, timeout: const Duration(seconds: 15)).catchError((e) => null);
+
+      if (createdId != null) {
+        // Ensure per-user chat summary exists for current user.
+        final myChatSummaryRef = _firestore.collection('users').doc(uid).collection('chats').doc(createdId);
+        try {
+          // Before writing, double-check if there is any per-user doc for same otherPublicId (race)
+          if (otherPublicId != null && otherPublicId.isNotEmpty) {
+            final existing = await _firestore
+                .collection('users')
+                .doc(uid)
+                .collection('chats')
+                .where('otherPublicId', isEqualTo: otherPublicId)
+                .limit(1)
+                .get();
+            if (existing.docs.isNotEmpty) {
+              // merge into existing rather than create a new doc
+              final doc = existing.docs.first;
+              await doc.reference.set({
+                'lastUpdated': FieldValue.serverTimestamp(),
+                'lastMessage': FieldValue.serverTimestamp(), // keep schema: you can update appropriately
+              }, SetOptions(merge: true));
+              isLoading = false;
+              notifyListeners();
+              return doc.id;
+            }
+          }
+
+          await myChatSummaryRef.set({
+            'title': contact.displayName,
+            'lastMessage': '',
+            'lastUpdated': FieldValue.serverTimestamp(),
+            'otherPublicId': otherPublicId ?? resolvedOther,
+            'isGroup': false,
+            'pinned': false,
+            'archived': false,
+            'unreadCount': 0,
+          }, SetOptions(merge: true));
+        } catch (_) {
+          // ignore; it's okay if rules prevent writing to users/{my}/chats
+        }
+
+        // Attempt best-effort to create other user's chat summary (may fail due to rules)
+        try {
+          final otherChatRef = _firestore.collection('users').doc(resolvedOther).collection('chats').doc(createdId);
+          await otherChatRef.set({
+            'title': (contact.displayName.isNotEmpty) ? contact.displayName : uid,
+            'lastMessage': '',
+            'lastUpdated': FieldValue.serverTimestamp(),
+            'otherPublicId': uid,
+            'isGroup': false,
+            'pinned': false,
+            'archived': false,
+            'unreadCount': 0,
+          }, SetOptions(merge: true));
+        } catch (_) {}
+
+        isLoading = false;
+        notifyListeners();
+        return createdId;
       }
 
-      return conversationId;
+      // transaction failed - final attempt to re-check canonical
+      final finalSnap = await convRef.get();
+      if (finalSnap.exists) {
+        isLoading = false;
+        notifyListeners();
+        return convRef.id;
+      }
+
+      throw StateError('Failed to create or find conversation');
     } catch (e) {
       debugPrint('[NewChatVM] openOrCreateConversation error: $e');
+      isLoading = false;
+      errorMessage = e.toString();
+      notifyListeners();
       rethrow;
     }
   }
