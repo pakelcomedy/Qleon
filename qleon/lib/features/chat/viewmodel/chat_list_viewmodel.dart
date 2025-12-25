@@ -462,6 +462,34 @@ class ChatListViewModel extends ChangeNotifier {
         otherPublicId: otherPublicId,
       );
 
+      // IMPORTANT: If the summary is archived and the view does NOT include archived,
+      // do not add it to the local map / UI. Still persist to users/{uid}/chats to keep server consistent.
+      if (summary.archived && !_includeArchived) {
+        // persist merged summary for this user (merge) but do not add to _chatMap
+        try {
+          await userChatRef.set({
+            'title': summary.title,
+            'isGroup': summary.isGroup,
+            'lastMessage': summary.lastMessage,
+            'lastUpdated': summary.lastUpdated,
+            'unreadCount': summary.unreadCount,
+            'pinned': summary.pinned,
+            'archived': summary.archived,
+            'otherPublicId': summary.otherPublicId,
+          }, SetOptions(merge: true));
+        } catch (e) {
+          debugPrint('[ChatListVM] failed to persist archived users chat $convId: $e');
+        }
+
+        // remove from local map if present (strict prevention)
+        if (_chatMap.containsKey(convId)) {
+          _chatMap.remove(convId);
+          _rebuildSortedListAndNotify();
+        }
+
+        return;
+      }
+
       // STRONG DEDUPE: if another existing chat represents the same other user, merge into it
       if (!isGroup && otherId.isNotEmpty) {
         final existingByOther = await _findExistingByOtherIdAsync(otherId);
@@ -771,6 +799,15 @@ class ChatListViewModel extends ChangeNotifier {
   ChatSummary? findById(String id) => _chatMap[id];
 
   void mergeIncomingChatSummary(ChatSummary summary) {
+    // Enforce strict prevention: if incoming summary archived and we don't include archived, skip it
+    if (summary.archived && !_includeArchived) {
+      if (_chatMap.containsKey(summary.id)) {
+        _chatMap.remove(summary.id);
+        _rebuildSortedListAndNotify();
+      }
+      return;
+    }
+
     final existing = _chatMap[summary.id];
     if (existing == null || _isDifferent(existing, summary)) {
       _chatMap[summary.id] = summary;
