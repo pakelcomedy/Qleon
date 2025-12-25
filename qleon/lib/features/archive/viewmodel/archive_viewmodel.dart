@@ -54,6 +54,7 @@ class ArchivedChat {
       lastUpdated: lastUpdated,
       unreadCount: (m['unreadCount'] as int?) ?? 0,
       pinned: (m['pinned'] as bool?) ?? false,
+      // conservative default: if missing, treat as archived=true
       archived: (m['archived'] as bool?) ?? true,
       isGroup: (m['isGroup'] as bool?) ?? false,
       otherPublicId: (m['otherPublicId'] as String?) ?? '',
@@ -166,36 +167,38 @@ class ArchiveViewModel extends ChangeNotifier {
           .orderBy('lastUpdated', descending: true)
           .limit(pageSize);
 
+      // REBUILD approach: when snapshot arrives, rebuild local map from snapshot.docs
       _sub = q.snapshots().listen((snap) {
-        _lastDoc = snap.docs.isNotEmpty ? snap.docs.last : null;
-        hasMore = snap.docs.length >= pageSize;
-        var changed = false;
-
-        for (final change in snap.docChanges) {
-          final id = change.doc.id;
-          final data = change.doc.data();
-          if (data == null) continue;
-
-          if (change.type == DocumentChangeType.added || change.type == DocumentChangeType.modified) {
-            final item = ArchivedChat.fromMap(id, data);
-            final existing = _map[id];
-            if (existing == null || _isDifferent(existing, item)) {
-              _map[id] = item;
-              changed = true;
-            }
-          } else if (change.type == DocumentChangeType.removed) {
-            if (_map.containsKey(id)) {
-              _map.remove(id);
-              changed = true;
-            }
+        try {
+          // Rebuild map from the authoritative snapshot to avoid duplicates/race conditions
+          final Map<String, ArchivedChat> newMap = {};
+          for (final doc in snap.docs) {
+            final data = doc.data();
+            if (data == null) continue;
+            // Ensure we only include items with archived==true (defensive)
+            final archivedField = (data['archived'] as bool?) ?? true;
+            if (!archivedField) continue;
+            final item = ArchivedChat.fromMap(doc.id, data);
+            newMap[doc.id] = item;
           }
+
+          // replace master map and rebuild list once
+          _map
+            ..clear()
+            ..addAll(newMap);
+
+          _lastDoc = snap.docs.isNotEmpty ? snap.docs.last : null;
+          hasMore = snap.docs.length >= pageSize;
+
+          _rebuildListAndNotify();
+          isLoading = false;
+          errorMessage = null;
+        } catch (e) {
+          debugPrint('[ArchiveVM] snapshot rebuild error: $e');
+          isLoading = false;
+          errorMessage = e.toString();
+          notifyListeners();
         }
-
-        if (changed) _rebuildListAndNotify();
-        else if (isLoading) notifyListeners();
-
-        isLoading = false;
-        errorMessage = null;
       }, onError: (e) {
         isLoading = false;
         errorMessage = e.toString();
@@ -258,7 +261,12 @@ class ArchiveViewModel extends ChangeNotifier {
 
       final next = await q.get();
       for (final doc in next.docs) {
-        final item = ArchivedChat.fromMap(doc.id, doc.data());
+        final data = doc.data();
+        if (data == null) continue;
+        // Defensive: ensure archived flag true
+        final archivedField = (data['archived'] as bool?) ?? true;
+        if (!archivedField) continue;
+        final item = ArchivedChat.fromMap(doc.id, data);
         final existing = _map[doc.id];
         if (existing == null || _isDifferent(existing, item)) {
           _map[doc.id] = item;
@@ -298,9 +306,6 @@ class ArchiveViewModel extends ChangeNotifier {
 
   // ---------------------------
   // Unarchive operations
-  // - per-user archived flag is stored under users/{uid}/chats/{convId}
-  // - we perform optimistic update locally and persist to firestore
-  // - we keep a backup to allow undoLastUnarchive()
   // ---------------------------
 
   /// Unarchive a single chat
@@ -334,11 +339,10 @@ class ArchiveViewModel extends ChangeNotifier {
         _lastUnarchiveBackup[id] = snap.exists ? (snap.data() ?? <String, dynamic>{}) : <String, dynamic>{};
       }
 
-      // optimistic local update
+      // OPTIMISTIC: remove from local archived map immediately (so UI won't show duplicates)
       for (final id in convIds) {
-        final existing = _map[id];
-        if (existing != null) {
-          _map[id] = existing.copyWith(archived: false, lastUpdated: Timestamp.now());
+        if (_map.containsKey(id)) {
+          _map.remove(id);
         }
       }
       _rebuildListAndNotify();
@@ -397,8 +401,7 @@ class ArchiveViewModel extends ChangeNotifier {
           // if there was no backup doc, set archived=true to restore
           final docRef = _firestore.collection('users').doc(uid).collection('chats').doc(id);
           batch.set(docRef, {'archived': true, 'lastUpdated': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-          // local: we cannot reconstruct full item, so remove until stream repopulates
-          _map.remove(id);
+          // local: we cannot reconstruct full item, it's safer to leave removed until snapshot repopulates
         }
       }
       await batch.commit();
