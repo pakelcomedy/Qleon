@@ -4,9 +4,10 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
+import 'package:hive/hive.dart';
 
 /// Local model representing the per-user persisted chat summary stored under:
-/// users/{uid}/chats/{convId}
+/// users/{uid}/chats/{convId} (but for archive we persist locally in Hive)
 class ArchivedChat {
   final String id;
   final String title;
@@ -35,8 +36,14 @@ class ArchivedChat {
     final dynamic lu = m['lastUpdated'];
     if (lu is Timestamp) {
       lastUpdated = lu;
-    } else if (lu is int) {
-      lastUpdated = Timestamp.fromMillisecondsSinceEpoch(lu);
+    } else if (lu is int || lu is double || lu is num) {
+      // heuristic: allow seconds or milliseconds
+      final n = (lu as num).toInt();
+      if (n < 100000000000) {
+        lastUpdated = Timestamp.fromMillisecondsSinceEpoch(n * 1000);
+      } else {
+        lastUpdated = Timestamp.fromMillisecondsSinceEpoch(n);
+      }
     } else if (lu is String) {
       try {
         lastUpdated = Timestamp.fromDate(DateTime.parse(lu));
@@ -54,14 +61,15 @@ class ArchivedChat {
       lastUpdated: lastUpdated,
       unreadCount: (m['unreadCount'] as int?) ?? 0,
       pinned: (m['pinned'] as bool?) ?? false,
-      // STRICT: default archived=false if missing — only treat as archived when explicit true
-      archived: (m['archived'] as bool?) ?? false,
+      // For archive semantics we keep archived=true when stored locally
+      archived: (m['archived'] as bool?) ?? true,
       isGroup: (m['isGroup'] as bool?) ?? false,
       otherPublicId: (m['otherPublicId'] as String?) ?? '',
     );
   }
 
-  Map<String, dynamic> toMap() => {
+  /// For writing back to Firestore (preserve Timestamp)
+  Map<String, dynamic> toMapForFirestore() => {
         'title': title,
         'lastMessage': lastMessage,
         'lastUpdated': lastUpdated,
@@ -71,6 +79,47 @@ class ArchivedChat {
         'isGroup': isGroup,
         'otherPublicId': otherPublicId,
       };
+
+  /// For storing in Hive: convert lastUpdated -> int (ms)
+  Map<String, dynamic> toMapForHive() => {
+        'title': title,
+        'lastMessage': lastMessage,
+        'lastUpdated': lastUpdated.millisecondsSinceEpoch,
+        'unreadCount': unreadCount,
+        'pinned': pinned,
+        'archived': archived,
+        'isGroup': isGroup,
+        'otherPublicId': otherPublicId,
+      };
+
+  factory ArchivedChat.fromHiveMap(String id, Map m) {
+    final dynamic lu = m['lastUpdated'];
+    Timestamp lastUpdated;
+    if (lu is int || lu is double || lu is num) {
+      final n = (lu as num).toInt();
+      if (n < 100000000000) {
+        lastUpdated = Timestamp.fromMillisecondsSinceEpoch(n * 1000);
+      } else {
+        lastUpdated = Timestamp.fromMillisecondsSinceEpoch(n);
+      }
+    } else if (lu is Timestamp) {
+      lastUpdated = lu;
+    } else {
+      lastUpdated = Timestamp.now();
+    }
+
+    return ArchivedChat(
+      id: id,
+      title: (m['title'] as String?) ?? '',
+      lastMessage: (m['lastMessage'] as String?) ?? '',
+      lastUpdated: lastUpdated,
+      unreadCount: (m['unreadCount'] as int?) ?? 0,
+      pinned: (m['pinned'] as bool?) ?? false,
+      archived: (m['archived'] as bool?) ?? true,
+      isGroup: (m['isGroup'] as bool?) ?? false,
+      otherPublicId: (m['otherPublicId'] as String?) ?? '',
+    );
+  }
 
   ArchivedChat copyWith({
     String? title,
@@ -96,22 +145,20 @@ class ArchivedChat {
   }
 }
 
-/// ViewModel for the Archive feature (shows archived chats for current user)
+/// ViewModel for the Archive feature (LOCAL-HIVE based archive)
+/// NOTE: archive is stored fully local in Hive box 'archived_chats'.
 class ArchiveViewModel extends ChangeNotifier {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
-  // Subscription to user's archived chats (users/{uid}/chats where archived==true)
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _sub;
-
-  // Master map + cached ordered list
+  // Master map + cached ordered list (source of truth for UI = Hive)
   final Map<String, ArchivedChat> _map = {};
   List<ArchivedChat> _list = [];
 
   // selection set for UI
   final Set<String> selectedIds = {};
 
-  // Pagination
+  // Pagination (not used for Hive but kept for API compatibility)
   static const int defaultPageSize = 30;
   int pageSize = defaultPageSize;
   DocumentSnapshot<Map<String, dynamic>>? _lastDoc;
@@ -127,6 +174,9 @@ class ArchiveViewModel extends ChangeNotifier {
   List<String>? _lastUnarchivedIds;
   final Map<String, Map<String, dynamic>> _lastUnarchiveBackup = {};
 
+  // Hive box
+  Box? _archiveBox;
+
   ArchiveViewModel() {
     _init();
   }
@@ -140,84 +190,46 @@ class ArchiveViewModel extends ChangeNotifier {
 
   Future<void> _init() async {
     final uid = currentUid;
-    if (uid == null) {
-      isLoading = false;
-      errorMessage = 'User not logged in';
-      notifyListeners();
-      return;
+
+    // initialize hive box (best effort)
+    try {
+      if (!Hive.isBoxOpen('archived_chats')) {
+        await Hive.openBox('archived_chats');
+      }
+      _archiveBox = Hive.box('archived_chats');
+    } catch (e) {
+      debugPrint('[ArchiveVM] failed to open Hive box archived_chats: $e');
+      _archiveBox = null;
     }
 
-    isLoading = true;
-    errorMessage = null;
+    // load local archive into memory
+    await _loadFromHive();
+
+    // set loading false
+    isLoading = false;
+    errorMessage = (uid == null) ? 'User not logged in' : null;
     notifyListeners();
+  }
 
+  Future<void> _loadFromHive() async {
+    _map.clear();
+    _list = [];
     try {
-      // cancel existing
-      await _sub?.cancel();
-      _map.clear();
-      _list = [];
-      _lastDoc = null;
-      hasMore = true;
-
-      Query<Map<String, dynamic>> q = _firestore
-          .collection('users')
-          .doc(uid)
-          .collection('chats')
-          .where('archived', isEqualTo: true)
-          .orderBy('lastUpdated', descending: true)
-          .limit(pageSize);
-
-      // REBUILD approach: when snapshot arrives, rebuild local map from snapshot.docs
-      _sub = q.snapshots().listen((snap) {
-        try {
-          // Rebuild map from the authoritative snapshot to avoid duplicates/race conditions
-          final Map<String, ArchivedChat> newMap = {};
-          for (final doc in snap.docs) {
-            final data = doc.data();
-            if (data == null) continue;
-            // DEFENSIVE BUT STRICT: include only when field explicitly true
-            final archivedField = (data['archived'] as bool?) ?? false;
-            if (!archivedField) continue;
-            final item = ArchivedChat.fromMap(doc.id, data);
-            newMap[doc.id] = item;
+      if (_archiveBox != null && _archiveBox!.isOpen) {
+        for (final key in _archiveBox!.keys) {
+          final v = _archiveBox!.get(key);
+          if (v is Map) {
+            final item = ArchivedChat.fromHiveMap(key.toString(), v);
+            _map[item.id] = item;
           }
-
-          // replace master map and rebuild list once
-          _map
-            ..clear()
-            ..addAll(newMap);
-
-          _lastDoc = snap.docs.isNotEmpty ? snap.docs.last : null;
-          hasMore = snap.docs.length >= pageSize;
-
-          _rebuildListAndNotify();
-          isLoading = false;
-          errorMessage = null;
-        } catch (e) {
-          debugPrint('[ArchiveVM] snapshot rebuild error: $e');
-          isLoading = false;
-          errorMessage = e.toString();
-          notifyListeners();
         }
-      }, onError: (e) {
-        isLoading = false;
-        errorMessage = e.toString();
-        notifyListeners();
-      });
+      }
+      _rebuildListAndNotify();
     } catch (e) {
-      isLoading = false;
+      debugPrint('[ArchiveVM] loadFromHive failed: $e');
       errorMessage = e.toString();
       notifyListeners();
     }
-  }
-
-  bool _isDifferent(ArchivedChat a, ArchivedChat b) {
-    return a.title != b.title ||
-        a.lastMessage != b.lastMessage ||
-        a.unreadCount != b.unreadCount ||
-        a.pinned != b.pinned ||
-        a.archived != b.archived ||
-        a.lastUpdated.millisecondsSinceEpoch != b.lastUpdated.millisecondsSinceEpoch;
   }
 
   void _rebuildListAndNotify() {
@@ -227,62 +239,13 @@ class ArchiveViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Manual refresh
+  /// Manual refresh (reload from Hive)
   Future<void> refresh() async {
-    await _sub?.cancel();
-    _map.clear();
-    _list = [];
-    _lastDoc = null;
-    hasMore = true;
     isLoading = true;
     notifyListeners();
-    await _init();
-  }
-
-  /// Pagination: load next page of archived chat summaries
-  Future<void> loadMore() async {
-    if (isPaginating || !hasMore) return;
-    final uid = currentUid;
-    if (uid == null) return;
-    if (_lastDoc == null) return;
-
-    isPaginating = true;
+    await _loadFromHive();
+    isLoading = false;
     notifyListeners();
-
-    try {
-      Query<Map<String, dynamic>> q = _firestore
-          .collection('users')
-          .doc(uid)
-          .collection('chats')
-          .where('archived', isEqualTo: true)
-          .orderBy('lastUpdated', descending: true)
-          .startAfterDocument(_lastDoc!)
-          .limit(pageSize);
-
-      final next = await q.get();
-      for (final doc in next.docs) {
-        final data = doc.data();
-        if (data == null) continue;
-        // Defensive: ensure archived flag true
-        final archivedField = (data['archived'] as bool?) ?? false;
-        if (!archivedField) continue;
-        final item = ArchivedChat.fromMap(doc.id, data);
-        final existing = _map[doc.id];
-        if (existing == null || _isDifferent(existing, item)) {
-          _map[doc.id] = item;
-        }
-      }
-      _lastDoc = next.docs.isNotEmpty ? next.docs.last : _lastDoc;
-      hasMore = next.docs.length >= pageSize;
-      _rebuildListAndNotify();
-      errorMessage = null;
-    } catch (e) {
-      errorMessage = e.toString();
-      notifyListeners();
-    } finally {
-      isPaginating = false;
-      notifyListeners();
-    }
   }
 
   // ---------------------------
@@ -305,118 +268,144 @@ class ArchiveViewModel extends ChangeNotifier {
   }
 
   // ---------------------------
-  // Unarchive operations
+  // Archive operations (LOCAL)
   // ---------------------------
 
-  /// Unarchive a single chat
-  Future<void> unarchive(String convId) async {
-    return unarchiveMultiple([convId]);
-  }
-
-  /// Unarchive multiple chats (optimistic). Stores backup for undo.
-  Future<void> unarchiveMultiple(List<String> convIds) async {
+  /// Archive multiple chats: move from Firestore -> Hive and delete server doc (best-effort).
+  Future<void> archiveMultiple(List<String> convIds) async {
     final uid = currentUid;
     if (uid == null) throw StateError('Not authenticated');
-
     if (convIds.isEmpty) return;
 
     isBusy = true;
     errorMessage = null;
     notifyListeners();
 
-    // backup previous user chat docs to allow undo
+    try {
+      for (final id in convIds) {
+        try {
+          final snap = await _firestore.collection('users').doc(uid).collection('chats').doc(id).get();
+          if (snap.exists && snap.data() != null) {
+            final data = snap.data()!;
+            // ensure archived flag true locally
+            final mapToStore = Map<String, dynamic>.from(data);
+            mapToStore['archived'] = true;
+            // convert lastUpdated to ms if Timestamp present
+            if (mapToStore['lastUpdated'] is Timestamp) {
+              mapToStore['lastUpdated'] = (mapToStore['lastUpdated'] as Timestamp).millisecondsSinceEpoch;
+            }
+            if (_archiveBox != null) {
+              await _archiveBox!.put(id, mapToStore);
+            }
+            // update local map
+            final archived = ArchivedChat.fromHiveMap(id, mapToStore);
+            _map[id] = archived;
+          } else {
+            // if no server doc, create a minimal archived entry locally
+            final fallback = ArchivedChat(
+              id: id,
+              title: '',
+              lastMessage: '',
+              lastUpdated: Timestamp.now(),
+              unreadCount: 0,
+              pinned: false,
+              archived: true,
+              isGroup: false,
+              otherPublicId: '',
+            );
+            if (_archiveBox != null) {
+              await _archiveBox!.put(id, fallback.toMapForHive());
+            }
+            _map[id] = fallback;
+          }
+
+          // best-effort delete server doc to avoid duplicates
+          try {
+            await _firestore.collection('users').doc(uid).collection('chats').doc(id).delete();
+          } catch (_) {}
+        } catch (e) {
+          debugPrint('[ArchiveVM] archiveMultiple: failed to archive $id: $e');
+        }
+      }
+
+      _rebuildListAndNotify();
+      errorMessage = null;
+    } catch (e) {
+      errorMessage = e.toString();
+    } finally {
+      isBusy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Unarchive multiple chats: move from Hive -> Firestore (write back) and remove from Hive.
+  /// Stores backup for undo.
+  Future<void> unarchiveMultiple(List<String> convIds) async {
+    final uid = currentUid;
+    if (uid == null) throw StateError('Not authenticated');
+    if (convIds.isEmpty) return;
+
+    isBusy = true;
+    errorMessage = null;
+    notifyListeners();
+
+    // backup hive data for undo
     _lastUnarchivedIds = List<String>.from(convIds);
     _lastUnarchiveBackup.clear();
 
     try {
-      // read existing docs (batched) to backup
-      final futures = convIds.map((id) => _firestore.collection('users').doc(uid).collection('chats').doc(id).get()).toList();
-      final snaps = await Future.wait(futures);
-
-      for (var i = 0; i < convIds.length; i++) {
-        final id = convIds[i];
-        final snap = snaps[i];
-        _lastUnarchiveBackup[id] = snap.exists ? (snap.data() ?? <String, dynamic>{}) : <String, dynamic>{};
-      }
-
-      // OPTIMISTIC: remove from local archived map immediately (so UI won't show duplicates)
       for (final id in convIds) {
-        if (_map.containsKey(id)) {
-          _map.remove(id);
-        }
-      }
-      _rebuildListAndNotify();
+        final raw = _archiveBox?.get(id);
+        if (raw is Map) {
+          // store backup
+          _lastUnarchiveBackup[id] = Map<String, dynamic>.from(raw);
 
-      // write batch to Firestore to set archived=false and update lastUpdated
-      final batch = _firestore.batch();
-      for (final id in convIds) {
-        final docRef = _firestore.collection('users').doc(uid).collection('chats').doc(id);
-        batch.set(docRef, {'archived': false, 'lastUpdated': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-      }
-      await batch.commit();
+          // convert to model
+          final s = ArchivedChat.fromHiveMap(id, raw);
 
-      // VERIFY: ensure server doc archived field actually false; if not, retry a couple times
-      for (final id in convIds) {
-        final docRef = _firestore.collection('users').doc(uid).collection('chats').doc(id);
-        var tries = 0;
-        while (tries < 3) {
-          tries++;
+          // write back to Firestore (merge) and mark archived=false
+          final docRef = _firestore.collection('users').doc(uid).collection('chats').doc(id);
+          final toWrite = s.toMapForFirestore();
+          toWrite['archived'] = false;
+          toWrite['lastUpdated'] = FieldValue.serverTimestamp();
+
           try {
-            final snap = await docRef.get();
-            final serverArchived = (snap.data()?['archived'] as bool?) ?? false;
-            if (!serverArchived) {
-              // ok: confirmed archived=false
-              break;
-            } else {
-              debugPrint('[ArchiveVM] post-commit check: archived still true for $id, retrying (attempt $tries)');
-              // try to force update
-              try {
-                await docRef.update({'archived': false, 'lastUpdated': FieldValue.serverTimestamp()});
-              } catch (e) {
-                debugPrint('[ArchiveVM] force update failed for $id: $e');
-              }
-              // small delay before next check (awaitable)
-              await Future.delayed(const Duration(milliseconds: 300));
-            }
+            await docRef.set(toWrite, SetOptions(merge: true));
           } catch (e) {
-            debugPrint('[ArchiveVM] error reading $id during verify: $e');
-            await Future.delayed(const Duration(milliseconds: 300));
+            debugPrint('[ArchiveVM] unarchiveMultiple: failed to write $id to server: $e');
+            // if write failed, keep backup and continue to next
+            continue;
           }
+
+          // remove from hive
+          try {
+            if (_archiveBox != null) await _archiveBox!.delete(id);
+          } catch (e) {
+            debugPrint('[ArchiveVM] unarchiveMultiple: failed to delete $id from hive: $e');
+          }
+
+          // remove from local map
+          _map.remove(id);
+        } else {
+          // no hive entry - nothing to do
+          debugPrint('[ArchiveVM] unarchiveMultiple: no hive entry for $id');
         }
       }
 
-      // final cleanup: ensure local map doesn't contain these ids (in case snapshot still hasn't reflected)
-      for (final id in convIds) {
-        _map.remove(id);
-      }
       _rebuildListAndNotify();
-
-      // If some doc still exists server-side as archived=true after retries, force a refresh subscription to re-sync
-      // (this is defensive: rare)
-      bool anyStillArchived = false;
-      for (final id in convIds) {
-        final doc = await _firestore.collection('users').doc(uid).collection('chats').doc(id).get();
-        final serverArchived = (doc.data()?['archived'] as bool?) ?? false;
-        if (serverArchived) {
-          anyStillArchived = true;
-          debugPrint('[ArchiveVM] after retries $id still archived on server');
-        }
-      }
-      if (anyStillArchived) {
-        await refresh();
-      }
 
       // success
       isBusy = false;
       notifyListeners();
     } catch (e) {
-      // rollback local optimistic update by restoring backup if possible
+      // restore local entries from backup in case of failure
       for (final id in convIds) {
         final backup = _lastUnarchiveBackup[id];
-        if (backup != null && backup.isNotEmpty) {
-          _map[id] = ArchivedChat.fromMap(id, backup);
-        } else {
-          _map.remove(id);
+        if (backup != null) {
+          _map[id] = ArchivedChat.fromHiveMap(id, backup);
+          try {
+            if (_archiveBox != null) await _archiveBox!.put(id, backup);
+          } catch (_) {}
         }
       }
       _rebuildListAndNotify();
@@ -428,7 +417,7 @@ class ArchiveViewModel extends ChangeNotifier {
     }
   }
 
-  /// Undo the last unarchive operation (if available)
+  /// Undo the last unarchive operation: restore backed-up hive entries and delete server docs written by unarchive
   Future<void> undoLastUnarchive() async {
     final uid = currentUid;
     if (uid == null) return;
@@ -443,19 +432,27 @@ class ArchiveViewModel extends ChangeNotifier {
       for (final id in ids) {
         final backup = _lastUnarchiveBackup[id];
         if (backup != null && backup.isNotEmpty) {
-          // restore full backup
+          // restore to hive
+          try {
+            if (_archiveBox != null) await _archiveBox!.put(id, backup);
+            _map[id] = ArchivedChat.fromHiveMap(id, backup);
+          } catch (e) {
+            debugPrint('[ArchiveVM] undoLastUnarchive: failed to restore hive for $id: $e');
+          }
+          // remove server doc (best-effort) to undo the unarchive
           final docRef = _firestore.collection('users').doc(uid).collection('chats').doc(id);
-          batch.set(docRef, backup, SetOptions(merge: true));
-          // update local map
-          _map[id] = ArchivedChat.fromMap(id, backup);
+          batch.delete(docRef);
         } else {
-          // if there was no backup doc, set archived=true to restore
+          // nothing to restore locally; as a fallback set archived=true on server
           final docRef = _firestore.collection('users').doc(uid).collection('chats').doc(id);
           batch.set(docRef, {'archived': true, 'lastUpdated': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-          // local: we cannot reconstruct full item, it's safer to leave removed until snapshot repopulates
         }
       }
-      await batch.commit();
+      try {
+        await batch.commit();
+      } catch (e) {
+        debugPrint('[ArchiveVM] undoLastUnarchive: batch commit failed: $e');
+      }
 
       // clear undo cache
       _lastUnarchivedIds = null;
@@ -472,6 +469,11 @@ class ArchiveViewModel extends ChangeNotifier {
     }
   }
 
+  /// Unarchive single chat (helper for UI compatibility)
+Future<void> unarchive(String convId) async {
+  await unarchiveMultiple([convId]);
+}
+
   /// Convenience: unarchive all currently selected items
   Future<void> unarchiveSelected() async {
     if (selectedIds.isEmpty) return;
@@ -481,14 +483,66 @@ class ArchiveViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ---------------------------
-  // Utilities
-  // ---------------------------
+  /// Return archived chats from local Hive (sorted)
+  Future<List<ArchivedChat>> getArchivedChats() async {
+    final list = <ArchivedChat>[];
+    try {
+      if (_archiveBox != null && _archiveBox!.isOpen) {
+        for (final key in _archiveBox!.keys) {
+          final v = _archiveBox!.get(key);
+          if (v is Map) {
+            list.add(ArchivedChat.fromHiveMap(key.toString(), v));
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[ArchiveVM] getArchivedChats failed: $e');
+    }
+    list.sort((a, b) => b.lastUpdated.millisecondsSinceEpoch.compareTo(a.lastUpdated.millisecondsSinceEpoch));
+    return list;
+  }
+
+  /// Remove archived entries locally (and optionally try to delete server doc)
+  Future<void> deleteArchived({List<String>? ids}) async {
+    final uids = ids ?? selectedIds.toList();
+    if (uids.isEmpty) return;
+
+    isBusy = true;
+    notifyListeners();
+
+    try {
+      final uid = currentUid;
+      for (final id in uids) {
+        try {
+          if (_archiveBox != null) await _archiveBox!.delete(id);
+        } catch (e) {
+          debugPrint('[ArchiveVM] deleteArchived: hive delete failed for $id: $e');
+        }
+        _map.remove(id);
+
+        // optional: try to remove server doc as well (best-effort)
+        if (uid != null) {
+          try {
+            await _firestore.collection('users').doc(uid).collection('chats').doc(id).delete();
+          } catch (_) {}
+        }
+      }
+      _rebuildListAndNotify();
+      selectedIds.removeAll(uids);
+      errorMessage = null;
+    } catch (e) {
+      errorMessage = e.toString();
+    } finally {
+      isBusy = false;
+      notifyListeners();
+    }
+  }
+
   ArchivedChat? findById(String id) => _map[id];
 
   @override
   void dispose() {
-    _sub?.cancel();
+    // nothing to cancel (no firestore snapshot for archived list)
     super.dispose();
   }
 }

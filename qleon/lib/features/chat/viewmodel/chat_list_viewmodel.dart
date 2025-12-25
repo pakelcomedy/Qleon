@@ -4,6 +4,7 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
+import 'package:hive/hive.dart';
 
 /// Summary information for a chat shown in the chat list.
 /// This maps to documents under: users/{uid}/chats/{chatId}
@@ -15,7 +16,7 @@ class ChatSummary {
   final Timestamp lastUpdated;
   final int unreadCount;
   final bool pinned;
-  final bool archived;
+  final bool archived; // kept for compatibility but NOT authoritative
   final String otherPublicId; // could be uid or public id (0x...)
 
   ChatSummary({
@@ -35,8 +36,14 @@ class ChatSummary {
     final dynamic lu = m['lastUpdated'];
     if (lu is Timestamp) {
       lastUpdated = lu;
-    } else if (lu is int) {
-      lastUpdated = Timestamp.fromMillisecondsSinceEpoch(lu);
+    } else if (lu is int || lu is double || lu is num) {
+      final n = (lu as num).toInt();
+      // heuristic: allow seconds or milliseconds
+      if (n < 100000000000) {
+        lastUpdated = Timestamp.fromMillisecondsSinceEpoch(n * 1000);
+      } else {
+        lastUpdated = Timestamp.fromMillisecondsSinceEpoch(n);
+      }
     } else if (lu is String) {
       try {
         final dt = DateTime.parse(lu);
@@ -56,17 +63,28 @@ class ChatSummary {
       lastUpdated: lastUpdated,
       unreadCount: (m['unreadCount'] as int?) ?? 0,
       pinned: (m['pinned'] as bool?) ?? false,
-      // BE CONSERVATIVE: if archived field missing, treat as true to prevent accidental show.
-      archived: (m['archived'] as bool?) ?? true,
+      // NOTE: archived coming from server is ignored by VM logic; kept for compatibility
+      archived: (m['archived'] as bool?) ?? false,
       otherPublicId: (m['otherPublicId'] as String?) ?? '',
     );
   }
 
-  Map<String, dynamic> toMap() => {
+  Map<String, dynamic> toMapForFirestore() => {
         'title': title,
         'isGroup': isGroup,
         'lastMessage': lastMessage,
         'lastUpdated': lastUpdated,
+        'unreadCount': unreadCount,
+        'pinned': pinned,
+        'archived': archived,
+        'otherPublicId': otherPublicId,
+      };
+
+  Map<String, dynamic> toMapForHive() => {
+        'title': title,
+        'isGroup': isGroup,
+        'lastMessage': lastMessage,
+        'lastUpdated': lastUpdated.millisecondsSinceEpoch,
         'unreadCount': unreadCount,
         'pinned': pinned,
         'archived': archived,
@@ -96,9 +114,39 @@ class ChatSummary {
       otherPublicId: otherPublicId ?? this.otherPublicId,
     );
   }
+
+  factory ChatSummary.fromHiveMap(String id, Map m) {
+    final dynamic lu = m['lastUpdated'];
+    Timestamp lastUpdated;
+    if (lu is int || lu is double || lu is num) {
+      final n = (lu as num).toInt();
+      if (n < 100000000000) {
+        lastUpdated = Timestamp.fromMillisecondsSinceEpoch(n * 1000);
+      } else {
+        lastUpdated = Timestamp.fromMillisecondsSinceEpoch(n);
+      }
+    } else if (lu is Timestamp) {
+      lastUpdated = lu;
+    } else {
+      lastUpdated = Timestamp.now();
+    }
+
+    return ChatSummary(
+      id: id,
+      title: (m['title'] as String?) ?? '',
+      isGroup: (m['isGroup'] as bool?) ?? false,
+      lastMessage: (m['lastMessage'] as String?) ?? '',
+      lastUpdated: lastUpdated,
+      unreadCount: (m['unreadCount'] as int?) ?? 0,
+      pinned: (m['pinned'] as bool?) ?? false,
+      archived: (m['archived'] as bool?) ?? true,
+      otherPublicId: (m['otherPublicId'] as String?) ?? '',
+    );
+  }
 }
 
 /// Production-ready ViewModel for ChatList with robust dedupe logic.
+/// This variant treats archive as LOCAL (Hive). It ignores server-side `archived` flags.
 class ChatListViewModel extends ChangeNotifier {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -122,7 +170,7 @@ class ChatListViewModel extends ChangeNotifier {
   bool isPaginating = false;
 
   String _query = '';
-  bool _includeArchived = false;
+  bool _includeArchived = false; // local toggle: if true, allow showing items that exist in Hive archive
   final Map<String, String> _userDisplayCache = {};
 
   // message-listener subscriptions per conversation id
@@ -131,6 +179,9 @@ class ChatListViewModel extends ChangeNotifier {
 
   // For dedupe: cache publicId -> uid resolution
   final Map<String, String> _publicToUidCache = {};
+
+  // Hive box for archived chats
+  Box? _archiveBox;
 
   ChatListViewModel() {
     _init();
@@ -149,26 +200,24 @@ class ChatListViewModel extends ChangeNotifier {
   bool get selectionMode => selectedIds.isNotEmpty;
   bool get hasSelection => selectedIds.isNotEmpty;
 
-  // Central helper: only put into _chatMap if allowed (not archived when includeArchived==false).
+  // Central helper: only put into _chatMap if allowed.
   // Returns true if put/updated, false if skipped/removed.
   bool _putIfAllowed(ChatSummary s) {
-    if (!_includeArchived && s.archived) {
+    // PREVENT: if this chat exists in archive (Hive) we MUST NOT add it to active list
+    if (_isStoredInArchive(s.id)) {
       if (_chatMap.containsKey(s.id)) {
         _chatMap.remove(s.id);
-        debugPrint('[ChatListVM] skip/remove archived chat ${s.id} because includeArchived=false');
-        _rebuildSortedListAndNotify();
+        debugPrint('[ChatListVM] removed chat ${s.id} because it exists in local archive');
       } else {
-        debugPrint('[ChatListVM] skip archived chat ${s.id} because includeArchived=false');
+        debugPrint('[ChatListVM] skipped adding ${s.id} because it exists in local archive');
       }
       return false;
     }
+
     _chatMap[s.id] = s;
     return true;
   }
 
-  // -----------------------
-  // Initialization / Listeners
-  // -----------------------
   Future<void> _init() async {
     final uid = currentUid;
     if (uid == null) {
@@ -181,6 +230,17 @@ class ChatListViewModel extends ChangeNotifier {
     isLoading = true;
     errorMessage = null;
     notifyListeners();
+
+    // Initialize Hive box for archived chats (best-effort)
+    try {
+      if (!Hive.isBoxOpen('archived_chats')) {
+        await Hive.openBox('archived_chats');
+      }
+      _archiveBox = Hive.box('archived_chats');
+    } catch (e) {
+      debugPrint('[ChatListVM] failed to open Hive box archived_chats: $e');
+      _archiveBox = null;
+    }
 
     try {
       await _sub?.cancel();
@@ -204,9 +264,7 @@ class ChatListViewModel extends ChangeNotifier {
           .orderBy('lastUpdated', descending: true)
           .limit(pageSize);
 
-      if (!_includeArchived) {
-        baseQuery = baseQuery.where('archived', isEqualTo: false);
-      }
+      // NOTE: Intentionally DO NOT filter by 'archived' field on server — archive is local-only
 
       _sub = baseQuery.snapshots().listen((snap) async {
         _lastDoc = snap.docs.isNotEmpty ? snap.docs.last : null;
@@ -220,18 +278,6 @@ class ChatListViewModel extends ChangeNotifier {
 
           if (change.type == DocumentChangeType.added || change.type == DocumentChangeType.modified) {
             final summary = ChatSummary.fromMap(id, data);
-
-            // STRICT: if archived and not including archived -> skip/remove (fromMap is conservative)
-            if (summary.archived && !_includeArchived) {
-              if (_chatMap.containsKey(id)) {
-                _chatMap.remove(id);
-                changed = true;
-                debugPrint('[ChatListVM] removed archived doc from users/{uid}/chats listener: $id');
-              } else {
-                debugPrint('[ChatListVM] skipping archived doc from users/{uid}/chats listener: $id');
-              }
-              continue;
-            }
 
             // STRONG DEDUPE: if 1:1 and existing by other, merge into existing
             if (!summary.isGroup && summary.otherPublicId.isNotEmpty) {
@@ -313,7 +359,6 @@ class ChatListViewModel extends ChangeNotifier {
         a.lastMessage != b.lastMessage ||
         a.unreadCount != b.unreadCount ||
         a.pinned != b.pinned ||
-        a.archived != b.archived ||
         a.otherPublicId != b.otherPublicId ||
         a.lastUpdated.millisecondsSinceEpoch != b.lastUpdated.millisecondsSinceEpoch;
   }
@@ -369,17 +414,13 @@ class ChatListViewModel extends ChangeNotifier {
           .startAfterDocument(_lastDoc!)
           .limit(pageSize);
 
-      if (!_includeArchived) q = q.where('archived', isEqualTo: false);
+      // NOTE: DO NOT filter by archived on server
 
       final nextSnap = await q.get();
       for (final doc in nextSnap.docs) {
         final id = doc.id;
         final summary = ChatSummary.fromMap(id, doc.data());
-        // only allow if helper permits
-        final put = _putIfAllowed(summary);
-        if (put) {
-          // mark changed implicitly by put; we'll rebuild later
-        }
+        _putIfAllowed(summary);
       }
       _lastDoc = nextSnap.docs.isNotEmpty ? nextSnap.docs.last : _lastDoc;
       hasMore = nextSnap.docs.length >= pageSize;
@@ -459,7 +500,6 @@ class ChatListViewModel extends ChangeNotifier {
       final userChatRef = _firestore.collection('users').doc(uid).collection('chats').doc(convId);
       int unreadCount = 0;
       bool pinned = false;
-      bool archived = true; // CONSERVATIVE DEFAULT: treat unknown as archived
       String otherPublicId = otherId;
       String titleToWrite = displayName;
 
@@ -469,14 +509,11 @@ class ChatListViewModel extends ChangeNotifier {
           final d = userChatSnap.data()!;
           unreadCount = (d['unreadCount'] as int?) ?? unreadCount;
           pinned = (d['pinned'] as bool?) ?? pinned;
-          // If the doc explicitly has archived=false, we can show it. Otherwise default true.
-          archived = (d['archived'] as bool?) ?? true;
           otherPublicId = (d['otherPublicId'] as String?) ?? otherPublicId;
           titleToWrite = (d['title'] as String?) ?? titleToWrite;
         }
       } catch (e) {
         debugPrint('[ChatListVM] unable to read users chat doc for $convId: $e');
-        // keep archived = true (conservative) to avoid showing it
       }
 
       final summary = ChatSummary(
@@ -487,35 +524,9 @@ class ChatListViewModel extends ChangeNotifier {
         lastUpdated: lastMessageTs,
         unreadCount: unreadCount,
         pinned: pinned,
-        archived: archived,
+        archived: false, // server archived flag is ignored in VM
         otherPublicId: otherPublicId,
       );
-
-      // If the summary is archived and view does NOT include archived -> persist but skip local add
-      if (summary.archived && !_includeArchived) {
-        // persist merged summary for this user (merge) but do not add to _chatMap
-        try {
-          await userChatRef.set({
-            'title': summary.title,
-            'isGroup': summary.isGroup,
-            'lastMessage': summary.lastMessage,
-            'lastUpdated': summary.lastUpdated,
-            'unreadCount': summary.unreadCount,
-            'pinned': summary.pinned,
-            'archived': summary.archived,
-            'otherPublicId': summary.otherPublicId,
-          }, SetOptions(merge: true));
-        } catch (e) {
-          debugPrint('[ChatListVM] failed to persist archived users chat $convId: $e');
-        }
-
-        if (_chatMap.containsKey(convId)) {
-          _chatMap.remove(convId);
-          _rebuildSortedListAndNotify();
-        }
-        debugPrint('[ChatListVM] skipped merge for archived conv $convId because includeArchived=false');
-        return;
-      }
 
       // STRONG DEDUPE: if another existing chat represents the same other user, merge into it
       if (!isGroup && otherId.isNotEmpty) {
@@ -529,8 +540,8 @@ class ChatListViewModel extends ChangeNotifier {
           final merged = existing.copyWith(
             lastMessage: lastMessageText.isNotEmpty ? lastMessageText : existing.lastMessage,
             lastUpdated: chosenLastUpdated,
-            // ensure archived flag preserved: if either is archived true, keep archived true
-            archived: existing.archived || summary.archived,
+            // archived state preserved locally, not from server
+            archived: existing.archived,
           );
 
           final put = _putIfAllowed(merged);
@@ -538,23 +549,14 @@ class ChatListViewModel extends ChangeNotifier {
 
           // persist merged to users/{uid}/chats/{existingId}
           try {
-            await _firestore.collection('users').doc(uid).collection('chats').doc(existingId).set({
-              'title': merged.title,
-              'isGroup': merged.isGroup,
-              'lastMessage': merged.lastMessage,
-              'lastUpdated': merged.lastUpdated,
-              'unreadCount': merged.unreadCount,
-              'pinned': merged.pinned,
-              'archived': merged.archived,
-              'otherPublicId': merged.otherPublicId,
-            }, SetOptions(merge: true));
+            await _firestore.collection('users').doc(uid).collection('chats').doc(existingId).set(merged.toMapForFirestore(), SetOptions(merge: true));
           } catch (e) {
             debugPrint('[ChatListVM] failed to persist merged users chat $existingId: $e');
           }
 
           // Best-effort delete duplicate per-user doc
           try {
-            await _firestore.collection('users').doc(uid).collection('chats').doc(convId).delete();
+            await userChatRef.delete();
           } catch (_) {}
 
           return; // merged; stop
@@ -567,16 +569,7 @@ class ChatListViewModel extends ChangeNotifier {
 
       // persist summary for this user (merge)
       try {
-        await userChatRef.set({
-          'title': summary.title,
-          'isGroup': summary.isGroup,
-          'lastMessage': summary.lastMessage,
-          'lastUpdated': summary.lastUpdated,
-          'unreadCount': summary.unreadCount,
-          'pinned': summary.pinned,
-          'archived': summary.archived,
-          'otherPublicId': summary.otherPublicId,
-        }, SetOptions(merge: true));
+        await userChatRef.set(summary.toMapForFirestore(), SetOptions(merge: true));
       } catch (e) {
         debugPrint('[ChatListVM] failed to persist users chat summary $convId: $e');
       }
@@ -589,10 +582,30 @@ class ChatListViewModel extends ChangeNotifier {
   // Dedup helpers: try to find existing ChatSummary for same otherId
   // -----------------------
   Future<ChatSummary?> _findExistingByOtherIdAsync(String otherId) async {
-    // quick pass: exact match on otherPublicId in cache, skip archived entries if view doesn't include archived
+    // quick pass: exact match on otherPublicId in cache
     for (final s in _chatMap.values) {
-      if (!_includeArchived && s.archived) continue;
       if (!s.isGroup && s.otherPublicId.isNotEmpty && s.otherPublicId == otherId) return s;
+    }
+
+    // check local archive as well (strict prevention of duplicates across active/archive)
+    try {
+      if (_archiveBox != null && _archiveBox!.isOpen) {
+        for (final key in _archiveBox!.keys) {
+          final v = _archiveBox!.get(key);
+          if (v is Map) {
+            final archived = ChatSummary.fromHiveMap(key.toString(), v);
+            if (!archived.isGroup) {
+              if (archived.otherPublicId == otherId) return archived;
+              if (archived.otherPublicId.startsWith('0x')) {
+                final resolved = await _resolvePublicToUidCached(archived.otherPublicId);
+                if (resolved != null && resolved == otherId) return archived;
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // ignore
     }
 
     // if otherId looks like publicId (0x...), try to resolve to uid and compare
@@ -600,7 +613,6 @@ class ChatListViewModel extends ChangeNotifier {
       final resolvedUid = await _resolvePublicToUidCached(otherId);
       if (resolvedUid != null) {
         for (final s in _chatMap.values) {
-          if (!_includeArchived && s.archived) continue;
           if (!s.isGroup) {
             if (s.otherPublicId == resolvedUid || s.otherPublicId == otherId) return s;
           }
@@ -608,7 +620,6 @@ class ChatListViewModel extends ChangeNotifier {
       }
     } else {
       for (final s in _chatMap.values) {
-        if (!_includeArchived && s.archived) continue;
         if (!s.isGroup) {
           if (s.otherPublicId == otherId) return s;
           if (s.otherPublicId.startsWith('0x')) {
@@ -722,6 +733,8 @@ class ChatListViewModel extends ChangeNotifier {
     }
   }
 
+  /// Archive chats LOCALLY in Hive. This will remove the per-user doc on Firestore
+  /// (best-effort) to prevent duplicates between "active" and "archived".
   Future<void> archiveChats({List<String>? chatIds}) async {
     final uid = currentUid;
     if (uid == null) throw Exception('Not logged in');
@@ -732,22 +745,38 @@ class ChatListViewModel extends ChangeNotifier {
     isBusy = true;
     notifyListeners();
 
-    final batch = _firestore.batch();
     try {
-      for (final id in ids) {
-        final docRef = _firestore.collection('users').doc(uid).collection('chats').doc(id);
-        batch.update(docRef, {'archived': true, 'lastUpdated': FieldValue.serverTimestamp()});
-      }
-      await batch.commit();
-
       for (final id in ids) {
         final existing = _chatMap[id];
         if (existing != null) {
-          final updated = existing.copyWith(archived: true, lastUpdated: Timestamp.now());
-          // helper will remove if includeArchived==false
-          _putIfAllowed(updated);
+          try {
+            if (_archiveBox != null) await _archiveBox!.put(id, existing.toMapForHive());
+          } catch (e) {
+            debugPrint('[ChatListVM] failed to write to archive box for $id: $e');
+          }
+          // remove active map entry
+          _chatMap.remove(id);
+        } else {
+          // if not present in cache, try to fetch users/{uid}/chats/{id} and move it
+          try {
+            final snap = await _firestore.collection('users').doc(uid).collection('chats').doc(id).get();
+            if (snap.exists) {
+              final s = ChatSummary.fromMap(id, snap.data()!);
+              if (_archiveBox != null) await _archiveBox!.put(id, s.toMapForHive());
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+
+        // remove server doc to avoid reappearing
+        try {
+          await _firestore.collection('users').doc(uid).collection('chats').doc(id).delete();
+        } catch (e) {
+          // ignore
         }
       }
+
       _rebuildSortedListAndNotify();
       selectedIds.removeAll(ids);
       errorMessage = null;
@@ -757,6 +786,68 @@ class ChatListViewModel extends ChangeNotifier {
       isBusy = false;
       notifyListeners();
     }
+  }
+
+  /// Unarchive chats: move from Hive back to Firestore (and active list)
+  Future<void> unarchiveChats({List<String>? chatIds}) async {
+    final uid = currentUid;
+    if (uid == null) throw Exception('Not logged in');
+
+    final ids = chatIds ?? selectedIds.toList();
+    if (ids.isEmpty) return;
+
+    isBusy = true;
+    notifyListeners();
+
+    try {
+      for (final id in ids) {
+        final raw = _archiveBox?.get(id);
+        if (raw is Map) {
+          final s = ChatSummary.fromHiveMap(id, raw);
+          // write back to Firestore users/{uid}/chats/{id}
+          try {
+            await _firestore.collection('users').doc(uid).collection('chats').doc(id).set(s.toMapForFirestore(), SetOptions(merge: true));
+          } catch (e) {
+            debugPrint('[ChatListVM] failed to persist unarchived chat $id: $e');
+          }
+          // remove from hive archive
+          try {
+            if (_archiveBox != null) await _archiveBox!.delete(id);
+          } catch (e) {
+            // ignore
+          }
+          // add back to active map
+          _putIfAllowed(s.copyWith(archived: false));
+        }
+      }
+
+      _rebuildSortedListAndNotify();
+      selectedIds.removeAll(ids);
+      errorMessage = null;
+    } catch (e) {
+      errorMessage = e.toString();
+    } finally {
+      isBusy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<List<ChatSummary>> getArchivedChats() async {
+    final list = <ChatSummary>[];
+    try {
+      if (_archiveBox != null && _archiveBox!.isOpen) {
+        for (final key in _archiveBox!.keys) {
+          final v = _archiveBox!.get(key);
+          if (v is Map) {
+            list.add(ChatSummary.fromHiveMap(key.toString(), v));
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[ChatListVM] failed to read archived chats: $e');
+    }
+    list.sort((a, b) => b.lastUpdated.millisecondsSinceEpoch.compareTo(a.lastUpdated.millisecondsSinceEpoch));
+    return list;
   }
 
   Future<void> deleteChats({List<String>? chatIds}) async {
@@ -774,6 +865,10 @@ class ChatListViewModel extends ChangeNotifier {
       for (final id in ids) {
         final docRef = _firestore.collection('users').doc(uid).collection('chats').doc(id);
         batch.delete(docRef);
+        // also remove from archive if present
+        try {
+          if (_archiveBox != null) await _archiveBox!.delete(id);
+        } catch (_) {}
       }
       await batch.commit();
 
@@ -825,13 +920,13 @@ class ChatListViewModel extends ChangeNotifier {
   ChatSummary? findById(String id) => _chatMap[id];
 
   void mergeIncomingChatSummary(ChatSummary summary) {
-    // Enforce strict prevention: if incoming summary archived and we don't include archived, skip it
-    if (summary.archived && !_includeArchived) {
+    // Now we IGNORE server-side archived flag. Instead consult local Hive archive.
+    if (_isStoredInArchive(summary.id) && !_includeArchived) {
       if (_chatMap.containsKey(summary.id)) {
         _chatMap.remove(summary.id);
         _rebuildSortedListAndNotify();
       }
-      debugPrint('[ChatListVM] mergeIncomingChatSummary skipped archived ${summary.id}');
+      debugPrint('[ChatListVM] mergeIncomingChatSummary skipped ${summary.id} because it exists in local archive');
       return;
     }
 
@@ -839,6 +934,14 @@ class ChatListViewModel extends ChangeNotifier {
     if (existing == null || _isDifferent(existing, summary)) {
       final put = _putIfAllowed(summary);
       if (put) _rebuildSortedListAndNotify();
+    }
+  }
+
+  bool _isStoredInArchive(String id) {
+    try {
+      return _archiveBox != null && _archiveBox!.isOpen && _archiveBox!.containsKey(id);
+    } catch (e) {
+      return false;
     }
   }
 

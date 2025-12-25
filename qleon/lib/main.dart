@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 
 import 'app/app_routes.dart';
 import 'di/locator.dart';
@@ -9,11 +10,15 @@ import 'features/shared/view/splash_view.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // 🔑 INIT HIVE (WAJIB SEBELUM DIPAKAI)
+  await Hive.initFlutter();
+  debugPrint("📦 Hive initialized");
+
   try {
     await Firebase.initializeApp();
     debugPrint("🔥 Firebase initialized successfully");
 
-    // debug: show firebase apps and currentUser at startup
+    // debug: show firebase apps
     try {
       final apps = Firebase.apps.map((a) => a.name).toList();
       debugPrint('Firebase.apps: $apps');
@@ -21,14 +26,18 @@ Future<void> main() async {
       debugPrint('Firebase.apps read error: $e');
     }
 
-    debugPrint("startup currentUser=${FirebaseAuth.instance.currentUser?.uid}");
+    debugPrint(
+      "startup currentUser=${FirebaseAuth.instance.currentUser?.uid}",
+    );
 
-    // also log the first idTokenChanges event (tiny helper)
-    FirebaseAuth.instance.idTokenChanges().take(1).listen((u) {
-      debugPrint('startup idTokenChanges emitted user=${u?.uid}');
-    }, onError: (e) {
-      debugPrint('startup idTokenChanges error: $e');
-    });
+    FirebaseAuth.instance.idTokenChanges().take(1).listen(
+      (u) {
+        debugPrint('startup idTokenChanges emitted user=${u?.uid}');
+      },
+      onError: (e) {
+        debugPrint('startup idTokenChanges error: $e');
+      },
+    );
   } catch (e) {
     debugPrint("❌ Firebase init failed: $e");
   }
