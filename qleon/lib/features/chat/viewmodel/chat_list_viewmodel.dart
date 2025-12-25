@@ -56,7 +56,8 @@ class ChatSummary {
       lastUpdated: lastUpdated,
       unreadCount: (m['unreadCount'] as int?) ?? 0,
       pinned: (m['pinned'] as bool?) ?? false,
-      archived: (m['archived'] as bool?) ?? false,
+      // BE CONSERVATIVE: if archived field missing, treat as true to prevent accidental show.
+      archived: (m['archived'] as bool?) ?? true,
       otherPublicId: (m['otherPublicId'] as String?) ?? '',
     );
   }
@@ -148,6 +149,23 @@ class ChatListViewModel extends ChangeNotifier {
   bool get selectionMode => selectedIds.isNotEmpty;
   bool get hasSelection => selectedIds.isNotEmpty;
 
+  // Central helper: only put into _chatMap if allowed (not archived when includeArchived==false).
+  // Returns true if put/updated, false if skipped/removed.
+  bool _putIfAllowed(ChatSummary s) {
+    if (!_includeArchived && s.archived) {
+      if (_chatMap.containsKey(s.id)) {
+        _chatMap.remove(s.id);
+        debugPrint('[ChatListVM] skip/remove archived chat ${s.id} because includeArchived=false');
+        _rebuildSortedListAndNotify();
+      } else {
+        debugPrint('[ChatListVM] skip archived chat ${s.id} because includeArchived=false');
+      }
+      return false;
+    }
+    _chatMap[s.id] = s;
+    return true;
+  }
+
   // -----------------------
   // Initialization / Listeners
   // -----------------------
@@ -177,7 +195,7 @@ class ChatListViewModel extends ChangeNotifier {
       _lastDoc = null;
       hasMore = true;
 
-      // per-user chat summaries listener (this is primary persisted source)
+      // per-user chat summaries listener (primary persisted source)
       Query<Map<String, dynamic>> baseQuery = _firestore
           .collection('users')
           .doc(uid)
@@ -190,7 +208,6 @@ class ChatListViewModel extends ChangeNotifier {
         baseQuery = baseQuery.where('archived', isEqualTo: false);
       }
 
-      // NOTE: listener callback marked async so we can await dedupe helpers
       _sub = baseQuery.snapshots().listen((snap) async {
         _lastDoc = snap.docs.isNotEmpty ? snap.docs.last : null;
         hasMore = snap.docs.length >= pageSize;
@@ -204,12 +221,22 @@ class ChatListViewModel extends ChangeNotifier {
           if (change.type == DocumentChangeType.added || change.type == DocumentChangeType.modified) {
             final summary = ChatSummary.fromMap(id, data);
 
-            // STRONG DEDUPE: if this summary represents a 1:1 with otherPublicId
-            // and that other already exists under different id, merge instead of adding new.
+            // STRICT: if archived and not including archived -> skip/remove (fromMap is conservative)
+            if (summary.archived && !_includeArchived) {
+              if (_chatMap.containsKey(id)) {
+                _chatMap.remove(id);
+                changed = true;
+                debugPrint('[ChatListVM] removed archived doc from users/{uid}/chats listener: $id');
+              } else {
+                debugPrint('[ChatListVM] skipping archived doc from users/{uid}/chats listener: $id');
+              }
+              continue;
+            }
+
+            // STRONG DEDUPE: if 1:1 and existing by other, merge into existing
             if (!summary.isGroup && summary.otherPublicId.isNotEmpty) {
               final existingByOther = await _findExistingByOtherIdAsync(summary.otherPublicId);
               if (existingByOther != null && existingByOther.id != id) {
-                // Merge: prefer newest lastUpdated
                 final chosenLastUpdated = summary.lastUpdated.millisecondsSinceEpoch > existingByOther.lastUpdated.millisecondsSinceEpoch
                     ? summary.lastUpdated
                     : existingByOther.lastUpdated;
@@ -217,20 +244,20 @@ class ChatListViewModel extends ChangeNotifier {
                   lastMessage: summary.lastMessage.isNotEmpty ? summary.lastMessage : existingByOther.lastMessage,
                   lastUpdated: chosenLastUpdated,
                 );
-                _chatMap[existingByOther.id] = merged;
-                // remove duplicate per-user doc (best-effort)
+                final put = _putIfAllowed(merged);
+                if (put) changed = true;
+                // best-effort remove duplicate doc
                 try {
                   await _firestore.collection('users').doc(uid).collection('chats').doc(id).delete();
                 } catch (_) {}
-                changed = true;
-                continue; // skip adding this doc as separate entry
+                continue;
               }
             }
 
             final existing = _chatMap[id];
             if (existing == null || _isDifferent(existing, summary)) {
-              _chatMap[id] = summary;
-              changed = true;
+              final put = _putIfAllowed(summary);
+              if (put) changed = true;
             }
           } else if (change.type == DocumentChangeType.removed) {
             if (_chatMap.containsKey(id)) {
@@ -253,8 +280,7 @@ class ChatListViewModel extends ChangeNotifier {
         notifyListeners();
       });
 
-      // Also listen to conversations collection for realtime last-message (to cover cases where
-      // server-side fan-out to users/{uid}/chats isn't in place)
+      // conversations listener (for realtime last-message fallback)
       _conversationsSub = _firestore.collection('conversations').where('members', arrayContains: uid).snapshots().listen((snap) {
         for (final change in snap.docChanges) {
           final doc = change.doc;
@@ -349,9 +375,10 @@ class ChatListViewModel extends ChangeNotifier {
       for (final doc in nextSnap.docs) {
         final id = doc.id;
         final summary = ChatSummary.fromMap(id, doc.data());
-        final existing = _chatMap[id];
-        if (existing == null || _isDifferent(existing, summary)) {
-          _chatMap[id] = summary;
+        // only allow if helper permits
+        final put = _putIfAllowed(summary);
+        if (put) {
+          // mark changed implicitly by put; we'll rebuild later
         }
       }
       _lastDoc = nextSnap.docs.isNotEmpty ? nextSnap.docs.last : _lastDoc;
@@ -432,7 +459,7 @@ class ChatListViewModel extends ChangeNotifier {
       final userChatRef = _firestore.collection('users').doc(uid).collection('chats').doc(convId);
       int unreadCount = 0;
       bool pinned = false;
-      bool archived = false;
+      bool archived = true; // CONSERVATIVE DEFAULT: treat unknown as archived
       String otherPublicId = otherId;
       String titleToWrite = displayName;
 
@@ -442,12 +469,14 @@ class ChatListViewModel extends ChangeNotifier {
           final d = userChatSnap.data()!;
           unreadCount = (d['unreadCount'] as int?) ?? unreadCount;
           pinned = (d['pinned'] as bool?) ?? pinned;
-          archived = (d['archived'] as bool?) ?? archived;
+          // If the doc explicitly has archived=false, we can show it. Otherwise default true.
+          archived = (d['archived'] as bool?) ?? true;
           otherPublicId = (d['otherPublicId'] as String?) ?? otherPublicId;
           titleToWrite = (d['title'] as String?) ?? titleToWrite;
         }
       } catch (e) {
         debugPrint('[ChatListVM] unable to read users chat doc for $convId: $e');
+        // keep archived = true (conservative) to avoid showing it
       }
 
       final summary = ChatSummary(
@@ -462,8 +491,7 @@ class ChatListViewModel extends ChangeNotifier {
         otherPublicId: otherPublicId,
       );
 
-      // IMPORTANT: If the summary is archived and the view does NOT include archived,
-      // do not add it to the local map / UI. Still persist to users/{uid}/chats to keep server consistent.
+      // If the summary is archived and view does NOT include archived -> persist but skip local add
       if (summary.archived && !_includeArchived) {
         // persist merged summary for this user (merge) but do not add to _chatMap
         try {
@@ -481,12 +509,11 @@ class ChatListViewModel extends ChangeNotifier {
           debugPrint('[ChatListVM] failed to persist archived users chat $convId: $e');
         }
 
-        // remove from local map if present (strict prevention)
         if (_chatMap.containsKey(convId)) {
           _chatMap.remove(convId);
           _rebuildSortedListAndNotify();
         }
-
+        debugPrint('[ChatListVM] skipped merge for archived conv $convId because includeArchived=false');
         return;
       }
 
@@ -502,10 +529,12 @@ class ChatListViewModel extends ChangeNotifier {
           final merged = existing.copyWith(
             lastMessage: lastMessageText.isNotEmpty ? lastMessageText : existing.lastMessage,
             lastUpdated: chosenLastUpdated,
+            // ensure archived flag preserved: if either is archived true, keep archived true
+            archived: existing.archived || summary.archived,
           );
 
-          _chatMap[existingId] = merged;
-          _rebuildSortedListAndNotify();
+          final put = _putIfAllowed(merged);
+          if (put) _rebuildSortedListAndNotify();
 
           // persist merged to users/{uid}/chats/{existingId}
           try {
@@ -532,12 +561,9 @@ class ChatListViewModel extends ChangeNotifier {
         }
       }
 
-      // Normal path: add/replace convId entry
-      final existing = _chatMap[convId];
-      if (existing == null || _isDifferent(existing, summary)) {
-        _chatMap[convId] = summary;
-        _rebuildSortedListAndNotify();
-      }
+      // Normal path: add/replace convId entry (use helper)
+      final put = _putIfAllowed(summary);
+      if (put) _rebuildSortedListAndNotify();
 
       // persist summary for this user (merge)
       try {
@@ -563,8 +589,9 @@ class ChatListViewModel extends ChangeNotifier {
   // Dedup helpers: try to find existing ChatSummary for same otherId
   // -----------------------
   Future<ChatSummary?> _findExistingByOtherIdAsync(String otherId) async {
-    // quick pass: exact match on otherPublicId in cache
+    // quick pass: exact match on otherPublicId in cache, skip archived entries if view doesn't include archived
     for (final s in _chatMap.values) {
+      if (!_includeArchived && s.archived) continue;
       if (!s.isGroup && s.otherPublicId.isNotEmpty && s.otherPublicId == otherId) return s;
     }
 
@@ -573,15 +600,15 @@ class ChatListViewModel extends ChangeNotifier {
       final resolvedUid = await _resolvePublicToUidCached(otherId);
       if (resolvedUid != null) {
         for (final s in _chatMap.values) {
+          if (!_includeArchived && s.archived) continue;
           if (!s.isGroup) {
-            // compare s.otherPublicId to resolvedUid or to publicId
             if (s.otherPublicId == resolvedUid || s.otherPublicId == otherId) return s;
           }
         }
       }
     } else {
-      // otherId is likely a uid; sometimes stored otherPublicId may be a publicId -> resolve and compare
       for (final s in _chatMap.values) {
+        if (!_includeArchived && s.archived) continue;
         if (!s.isGroup) {
           if (s.otherPublicId == otherId) return s;
           if (s.otherPublicId.startsWith('0x')) {
@@ -605,7 +632,6 @@ class ChatListViewModel extends ChangeNotifier {
         _publicToUidCache[publicId] = uid;
         return uid;
       }
-      // cache negative result to avoid repeated queries
       _publicToUidCache[publicId] = '';
       return null;
     } catch (e) {
@@ -632,7 +658,7 @@ class ChatListViewModel extends ChangeNotifier {
   }
 
   // -----------------------
-  // Selection / CRUD helpers (unchanged, except local map maintenance)
+  // Selection / CRUD helpers
   // -----------------------
   void startSelection(String chatId) {
     selectedIds.add(chatId);
@@ -683,8 +709,8 @@ class ChatListViewModel extends ChangeNotifier {
       if (idx >= 0) {
         final old = _cachedChats[idx];
         final updated = old.copyWith(pinned: !old.pinned, lastUpdated: Timestamp.now());
-        _chatMap[chatId] = updated;
-        _rebuildSortedListAndNotify();
+        final put = _putIfAllowed(updated);
+        if (put) _rebuildSortedListAndNotify();
       }
       selectedIds.clear();
       errorMessage = null;
@@ -718,8 +744,8 @@ class ChatListViewModel extends ChangeNotifier {
         final existing = _chatMap[id];
         if (existing != null) {
           final updated = existing.copyWith(archived: true, lastUpdated: Timestamp.now());
-          _chatMap[id] = updated;
-          if (!_includeArchived) _chatMap.remove(id);
+          // helper will remove if includeArchived==false
+          _putIfAllowed(updated);
         }
       }
       _rebuildSortedListAndNotify();
@@ -776,7 +802,7 @@ class ChatListViewModel extends ChangeNotifier {
       final idx = _cachedChats.indexWhere((c) => c.id == chatId);
       if (idx >= 0) {
         final updated = _cachedChats[idx].copyWith(unreadCount: 0);
-        _chatMap[chatId] = updated;
+        _putIfAllowed(updated);
         _rebuildSortedListAndNotify();
       }
     } catch (e) {
@@ -805,13 +831,14 @@ class ChatListViewModel extends ChangeNotifier {
         _chatMap.remove(summary.id);
         _rebuildSortedListAndNotify();
       }
+      debugPrint('[ChatListVM] mergeIncomingChatSummary skipped archived ${summary.id}');
       return;
     }
 
     final existing = _chatMap[summary.id];
     if (existing == null || _isDifferent(existing, summary)) {
-      _chatMap[summary.id] = summary;
-      _rebuildSortedListAndNotify();
+      final put = _putIfAllowed(summary);
+      if (put) _rebuildSortedListAndNotify();
     }
   }
 
