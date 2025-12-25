@@ -65,6 +65,22 @@ class _ChatRoomViewState extends State<ChatRoomView> {
     _controller.addListener(_onTextChanged);
   }
 
+  void _openContactOrGroupDetail() {
+  Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (_) => widget.isGroup
+          ? const GroupDetailView()
+          : ContactDetailView(
+              // pass the required conversation id so the viewmodel can resolve contact
+              conversationIdOrId: widget.conversationId,
+              // optional: pass title if your ContactDetailView accepts it
+              title: widget.title,
+            ),
+    ),
+  );
+}
+
   @override
   void dispose() {
     vm.dispose();
@@ -255,31 +271,40 @@ class _ChatRoomViewState extends State<ChatRoomView> {
     }
   }
 
-  PreferredSizeWidget _buildNormalAppBar() {
-    return AppBar(
-      backgroundColor: Colors.white,
-      elevation: 0,
-      leading: IconButton(icon: const Icon(Icons.arrow_back, color: Color(0xFF374151)), onPressed: () => Navigator.pop(context)),
-      title: Text(widget.title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15, color: Color(0xFF111827))),
-      actions: [
-        IconButton(icon: const Icon(Icons.call_outlined, color: Color(0xFF374151)), onPressed: _confirmCallAndNavigate),
-        PopupMenuButton<int>(
-          icon: const Icon(Icons.more_vert, color: Color(0xFF374151)),
-          onSelected: (action) {
-            if (action == 0) {
-              Navigator.push(context, MaterialPageRoute(builder: (_) => widget.isGroup ? const GroupDetailView() : const ContactDetailView()));
-            } else if (action == 1) {
-              _showClearChatDialog();
-            }
-          },
-          itemBuilder: (_) => [
-            PopupMenuItem(value: 0, child: Text(widget.isGroup ? 'Group info' : 'Contact info')),
-            const PopupMenuItem(value: 1, child: Text('Clear chat', style: TextStyle(color: Colors.red))),
-          ],
-        ),
-      ],
-    );
-  }
+PreferredSizeWidget _buildNormalAppBar() {
+  return AppBar(
+    backgroundColor: Colors.white,
+    elevation: 0,
+    leading: IconButton(
+      icon: const Icon(Icons.arrow_back, color: Color(0xFF374151)),
+      onPressed: () => Navigator.pop(context),
+    ),
+    title: Text(
+      widget.title,
+      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15, color: Color(0xFF111827)),
+    ),
+    actions: [
+      IconButton(
+        icon: const Icon(Icons.call_outlined, color: Color(0xFF374151)),
+        onPressed: _confirmCallAndNavigate,
+      ),
+      PopupMenuButton<int>(
+        icon: const Icon(Icons.more_vert, color: Color(0xFF374151)),
+        onSelected: (action) {
+          if (action == 0) {
+            _openContactOrGroupDetail();
+          } else if (action == 1) {
+            _showClearChatDialog();
+          }
+        },
+        itemBuilder: (_) => [
+          PopupMenuItem(value: 0, child: Text(widget.isGroup ? 'Group info' : 'Contact info')),
+          const PopupMenuItem(value: 1, child: Text('Clear chat', style: TextStyle(color: Colors.red))),
+        ],
+      ),
+    ],
+  );
+}
 
   PreferredSizeWidget _buildSelectionAppBar() {
     final single = vm.selectedMessageIds.length == 1;
