@@ -54,8 +54,8 @@ class ArchivedChat {
       lastUpdated: lastUpdated,
       unreadCount: (m['unreadCount'] as int?) ?? 0,
       pinned: (m['pinned'] as bool?) ?? false,
-      // conservative default: if missing, treat as archived=true
-      archived: (m['archived'] as bool?) ?? true,
+      // STRICT: default archived=false if missing — only treat as archived when explicit true
+      archived: (m['archived'] as bool?) ?? false,
       isGroup: (m['isGroup'] as bool?) ?? false,
       otherPublicId: (m['otherPublicId'] as String?) ?? '',
     );
@@ -175,8 +175,8 @@ class ArchiveViewModel extends ChangeNotifier {
           for (final doc in snap.docs) {
             final data = doc.data();
             if (data == null) continue;
-            // Ensure we only include items with archived==true (defensive)
-            final archivedField = (data['archived'] as bool?) ?? true;
+            // DEFENSIVE BUT STRICT: include only when field explicitly true
+            final archivedField = (data['archived'] as bool?) ?? false;
             if (!archivedField) continue;
             final item = ArchivedChat.fromMap(doc.id, data);
             newMap[doc.id] = item;
@@ -264,7 +264,7 @@ class ArchiveViewModel extends ChangeNotifier {
         final data = doc.data();
         if (data == null) continue;
         // Defensive: ensure archived flag true
-        final archivedField = (data['archived'] as bool?) ?? true;
+        final archivedField = (data['archived'] as bool?) ?? false;
         if (!archivedField) continue;
         final item = ArchivedChat.fromMap(doc.id, data);
         final existing = _map[doc.id];
@@ -354,6 +354,57 @@ class ArchiveViewModel extends ChangeNotifier {
         batch.set(docRef, {'archived': false, 'lastUpdated': FieldValue.serverTimestamp()}, SetOptions(merge: true));
       }
       await batch.commit();
+
+      // VERIFY: ensure server doc archived field actually false; if not, retry a couple times
+      for (final id in convIds) {
+        final docRef = _firestore.collection('users').doc(uid).collection('chats').doc(id);
+        var tries = 0;
+        while (tries < 3) {
+          tries++;
+          try {
+            final snap = await docRef.get();
+            final serverArchived = (snap.data()?['archived'] as bool?) ?? false;
+            if (!serverArchived) {
+              // ok: confirmed archived=false
+              break;
+            } else {
+              debugPrint('[ArchiveVM] post-commit check: archived still true for $id, retrying (attempt $tries)');
+              // try to force update
+              try {
+                await docRef.update({'archived': false, 'lastUpdated': FieldValue.serverTimestamp()});
+              } catch (e) {
+                debugPrint('[ArchiveVM] force update failed for $id: $e');
+              }
+              // small delay before next check (awaitable)
+              await Future.delayed(const Duration(milliseconds: 300));
+            }
+          } catch (e) {
+            debugPrint('[ArchiveVM] error reading $id during verify: $e');
+            await Future.delayed(const Duration(milliseconds: 300));
+          }
+        }
+      }
+
+      // final cleanup: ensure local map doesn't contain these ids (in case snapshot still hasn't reflected)
+      for (final id in convIds) {
+        _map.remove(id);
+      }
+      _rebuildListAndNotify();
+
+      // If some doc still exists server-side as archived=true after retries, force a refresh subscription to re-sync
+      // (this is defensive: rare)
+      bool anyStillArchived = false;
+      for (final id in convIds) {
+        final doc = await _firestore.collection('users').doc(uid).collection('chats').doc(id).get();
+        final serverArchived = (doc.data()?['archived'] as bool?) ?? false;
+        if (serverArchived) {
+          anyStillArchived = true;
+          debugPrint('[ArchiveVM] after retries $id still archived on server');
+        }
+      }
+      if (anyStillArchived) {
+        await refresh();
+      }
 
       // success
       isBusy = false;
