@@ -294,12 +294,20 @@ class ArchiveViewModel extends ChangeNotifier {
             if (mapToStore['lastUpdated'] is Timestamp) {
               mapToStore['lastUpdated'] = (mapToStore['lastUpdated'] as Timestamp).millisecondsSinceEpoch;
             }
+
+            // write to hive FIRST so UI and ChatListVM see it immediately as archived
             if (_archiveBox != null) {
               await _archiveBox!.put(id, mapToStore);
             }
+
             // update local map
             final archived = ArchivedChat.fromHiveMap(id, mapToStore);
             _map[id] = archived;
+
+            // best-effort delete server doc to avoid duplicates
+            try {
+              await _firestore.collection('users').doc(uid).collection('chats').doc(id).delete();
+            } catch (_) {}
           } else {
             // if no server doc, create a minimal archived entry locally
             final fallback = ArchivedChat(
@@ -318,11 +326,6 @@ class ArchiveViewModel extends ChangeNotifier {
             }
             _map[id] = fallback;
           }
-
-          // best-effort delete server doc to avoid duplicates
-          try {
-            await _firestore.collection('users').doc(uid).collection('chats').doc(id).delete();
-          } catch (_) {}
         } catch (e) {
           debugPrint('[ArchiveVM] archiveMultiple: failed to archive $id: $e');
         }
@@ -363,6 +366,18 @@ class ArchiveViewModel extends ChangeNotifier {
           // convert to model
           final s = ArchivedChat.fromHiveMap(id, raw);
 
+          // --- IMPORTANT: remove from Hive first so other VMs (ChatListVM) stop treating it as archived
+          try {
+            if (_archiveBox != null) await _archiveBox!.delete(id);
+          } catch (e) {
+            debugPrint('[ArchiveVM] unarchiveMultiple: failed to delete $id from hive: $e');
+            // continue - we'll try to write to server and restore if needed
+          }
+
+          // remove from local map immediately so archive UI updates
+          _map.remove(id);
+          _rebuildListAndNotify();
+
           // write back to Firestore (merge) and mark archived=false
           final docRef = _firestore.collection('users').doc(uid).collection('chats').doc(id);
           final toWrite = s.toMapForFirestore();
@@ -371,49 +386,60 @@ class ArchiveViewModel extends ChangeNotifier {
 
           try {
             await docRef.set(toWrite, SetOptions(merge: true));
+            // keep backup until undo is invoked
           } catch (e) {
             debugPrint('[ArchiveVM] unarchiveMultiple: failed to write $id to server: $e');
-            // if write failed, keep backup and continue to next
+            // restore local archive from backup because server write failed
+            final backup = _lastUnarchiveBackup[id];
+            if (backup != null) {
+              try {
+                if (_archiveBox != null) await _archiveBox!.put(id, backup);
+                _map[id] = ArchivedChat.fromHiveMap(id, backup);
+                _rebuildListAndNotify();
+              } catch (e2) {
+                debugPrint('[ArchiveVM] unarchiveMultiple: failed to restore hive for $id after server-write failure: $e2');
+              }
+            }
+            // continue to next id
             continue;
           }
-
-          // remove from hive
-          try {
-            if (_archiveBox != null) await _archiveBox!.delete(id);
-          } catch (e) {
-            debugPrint('[ArchiveVM] unarchiveMultiple: failed to delete $id from hive: $e');
-          }
-
-          // remove from local map
-          _map.remove(id);
         } else {
-          // no hive entry - nothing to do
-          debugPrint('[ArchiveVM] unarchiveMultiple: no hive entry for $id');
+          // no hive entry - nothing to do locally, but still attempt to ensure server has archived=false
+          debugPrint('[ArchiveVM] unarchiveMultiple: no hive entry for $id, attempting server write');
+
+          final docRef = _firestore.collection('users').doc(uid).collection('chats').doc(id);
+          final toWrite = {
+            'archived': false,
+            'lastUpdated': FieldValue.serverTimestamp(),
+          };
+          try {
+            await docRef.set(toWrite, SetOptions(merge: true));
+          } catch (e) {
+            debugPrint('[ArchiveVM] unarchiveMultiple: server write failed for $id (no local entry): $e');
+          }
         }
       }
 
-      _rebuildListAndNotify();
-
-      // success
-      isBusy = false;
-      notifyListeners();
+      // finalize: keep _lastUnarchivedIds/_lastUnarchiveBackup for possible undo
+      errorMessage = null;
     } catch (e) {
-      // restore local entries from backup in case of failure
+      // On unexpected error: attempt to restore backups
       for (final id in convIds) {
         final backup = _lastUnarchiveBackup[id];
         if (backup != null) {
-          _map[id] = ArchivedChat.fromHiveMap(id, backup);
           try {
             if (_archiveBox != null) await _archiveBox!.put(id, backup);
+            _map[id] = ArchivedChat.fromHiveMap(id, backup);
           } catch (_) {}
         }
       }
       _rebuildListAndNotify();
 
-      isBusy = false;
       errorMessage = e.toString();
-      notifyListeners();
       rethrow;
+    } finally {
+      isBusy = false;
+      notifyListeners();
     }
   }
 
@@ -470,9 +496,9 @@ class ArchiveViewModel extends ChangeNotifier {
   }
 
   /// Unarchive single chat (helper for UI compatibility)
-Future<void> unarchive(String convId) async {
-  await unarchiveMultiple([convId]);
-}
+  Future<void> unarchive(String convId) async {
+    await unarchiveMultiple([convId]);
+  }
 
   /// Convenience: unarchive all currently selected items
   Future<void> unarchiveSelected() async {

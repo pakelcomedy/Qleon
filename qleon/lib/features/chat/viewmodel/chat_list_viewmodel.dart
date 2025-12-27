@@ -788,50 +788,6 @@ class ChatListViewModel extends ChangeNotifier {
     }
   }
 
-  /// Unarchive chats: move from Hive back to Firestore (and active list)
-  Future<void> unarchiveChats({List<String>? chatIds}) async {
-    final uid = currentUid;
-    if (uid == null) throw Exception('Not logged in');
-
-    final ids = chatIds ?? selectedIds.toList();
-    if (ids.isEmpty) return;
-
-    isBusy = true;
-    notifyListeners();
-
-    try {
-      for (final id in ids) {
-        final raw = _archiveBox?.get(id);
-        if (raw is Map) {
-          final s = ChatSummary.fromHiveMap(id, raw);
-          // write back to Firestore users/{uid}/chats/{id}
-          try {
-            await _firestore.collection('users').doc(uid).collection('chats').doc(id).set(s.toMapForFirestore(), SetOptions(merge: true));
-          } catch (e) {
-            debugPrint('[ChatListVM] failed to persist unarchived chat $id: $e');
-          }
-          // remove from hive archive
-          try {
-            if (_archiveBox != null) await _archiveBox!.delete(id);
-          } catch (e) {
-            // ignore
-          }
-          // add back to active map
-          _putIfAllowed(s.copyWith(archived: false));
-        }
-      }
-
-      _rebuildSortedListAndNotify();
-      selectedIds.removeAll(ids);
-      errorMessage = null;
-    } catch (e) {
-      errorMessage = e.toString();
-    } finally {
-      isBusy = false;
-      notifyListeners();
-    }
-  }
-
   Future<List<ChatSummary>> getArchivedChats() async {
     final list = <ChatSummary>[];
     try {

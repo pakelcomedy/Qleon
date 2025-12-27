@@ -2,7 +2,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:flutter/services.dart';
 
 import '../viewmodel/add_contact_viewmodel.dart';
@@ -16,7 +15,6 @@ class AddContactView extends StatefulWidget {
 }
 
 class _AddContactViewState extends State<AddContactView> {
-  bool _isScanned = false;
 
   @override
   Widget build(BuildContext context) {
@@ -28,7 +26,7 @@ class _AddContactViewState extends State<AddContactView> {
 }
 
 class _AddContactBody extends StatefulWidget {
-  const _AddContactBody({super.key});
+  const _AddContactBody();
 
   @override
   State<_AddContactBody> createState() => _AddContactBodyState();
@@ -111,7 +109,7 @@ class _AddContactBodyState extends State<_AddContactBody> {
   Future<void> _handleQrResult(BuildContext context, String data, AddContactViewModel vm) async {
     // process data using VM
     try {
-      final messenger = ScaffoldMessenger.of(context);
+      ScaffoldMessenger.of(context);
       // process and get ChatContact
       final ChatContact contact = await vm.processScannedPayload(data);
 
@@ -131,51 +129,13 @@ class _AddContactBodyState extends State<_AddContactBody> {
     }
   }
 
-  Future<void> _pickImageFromGallery(BuildContext context) async {
-    final vm = context.read<AddContactViewModel>();
-    final messenger = ScaffoldMessenger.of(context);
-
-    final ImagePicker picker = ImagePicker();
-    final XFile? image = await picker.pickImage(source: ImageSource.gallery);
-    if (image == null) return;
-
-    // try to decode using cameraController.analyzeImage (may not be available)
-    try {
-      final decoded = await vm.decodeQrFromImage(image.path);
-      if (decoded == null || decoded.isEmpty) {
-        messenger.showSnackBar(
-          const SnackBar(content: Text('No QR code found in image')),
-        );
-        return;
-      }
-
-      setState(() => _isScanned = true);
-
-      try {
-        final ChatContact contact = await vm.processScannedPayload(decoded);
-        if (!mounted) return;
-        Navigator.pop(context, contact);
-      } catch (e) {
-        if (!mounted) return;
-        messenger.showSnackBar(
-          SnackBar(content: Text('Cannot add contact: ${vm.errorMessage ?? e}')),
-        );
-        setState(() => _isScanned = false);
-      }
-    } catch (e) {
-      // decode method not available or failed
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Failed to decode image on this device')),
-      );
-    }
-  }
 }
 
 /// =============================================================
 /// SCAN OVERLAY UI
 /// =============================================================
 class _ScanOverlay extends StatelessWidget {
-  const _ScanOverlay({super.key});
+  const _ScanOverlay();
 
   @override
   Widget build(BuildContext context) {

@@ -1,69 +1,280 @@
-// chat_room_viewmodel.dart
-// Robust ChatRoomViewModel: resolves conversation docId, optimistic UI, safer parsing.
-// Features:
-//  - resolve publicId (0x...) -> uid by querying users collection
-//  - normalize to canonical uidA_uidB when possible
-//  - listen to canonical and legacy conversation docs and merge messages in-memory
-//  - optimistic UI and safe parsing
-//  - dedupe using fingerprint and remove legacy listener if it only produces duplicates
+// lib/features/chat/viewmodel/chat_room_viewmodel.dart
+// Offline-first ChatRoomViewModel (local-first like WhatsApp) with:
+// - SQLite local source-of-truth
+// - Firestore as temporary queue + TTL (3 days)
+// - optimistic send, pending queue, retries, ACK handling
+// Dependencies:
+//   sqflite: ^2.2.8
+//   path_provider: ^2.0.14
 
 import 'dart:async';
+import 'dart:io';
+import 'dart:math';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:sqflite/sqflite.dart';
 
+/// -----------------------------
+/// Data model
+/// -----------------------------
 class ChatMessage {
   final String id;
+  final String conversationId;
   final String text;
   final String senderId;
   final Timestamp createdAt;
   final String? replyToMessageId;
   final bool isDeleted;
-  final bool isLocal;
+  final bool isLocal; // optimistic/local-only indicator
+  final bool delivered; // server delivered flag
+  final Timestamp? deliveredAt;
+  final Timestamp? expiresAt;
+
+  /// sendState: 'pending' | 'sending' | 'sent' | 'failed'
+  final String sendState;
+  final int sendAttempts;
 
   ChatMessage({
     required this.id,
+    required this.conversationId,
     required this.text,
     required this.senderId,
     required this.createdAt,
     this.replyToMessageId,
     this.isDeleted = false,
     this.isLocal = false,
+    this.delivered = false,
+    this.deliveredAt,
+    this.expiresAt,
+    this.sendState = 'sent',
+    this.sendAttempts = 0,
   });
 
-  factory ChatMessage.fromDoc(QueryDocumentSnapshot doc) {
+  /// Safe factory from Firestore document snapshot (server copy)
+  factory ChatMessage.fromDoc(QueryDocumentSnapshot doc, {String? conversationIdOverride}) {
     final data = doc.data() as Map<String, dynamic>? ?? <String, dynamic>{};
     final rawCreatedAt = data['createdAt'];
     final createdAt = (rawCreatedAt is Timestamp) ? rawCreatedAt : Timestamp.now();
-    final isLocal = rawCreatedAt == null;
+    final delivered = (data['delivered'] as bool?) ?? false;
+    final deliveredAt = (data['deliveredAt'] is Timestamp) ? data['deliveredAt'] as Timestamp : null;
+    final expiresAt = (data['expiresAt'] is Timestamp) ? data['expiresAt'] as Timestamp : null;
+
+    // server copy is considered not local; sendState defaults to 'sent'
     return ChatMessage(
       id: doc.id,
+      conversationId: conversationIdOverride ?? (data['conversationId']?.toString() ?? ''),
       text: (data['text'] ?? '').toString(),
       senderId: (data['senderId'] ?? 'unknown').toString(),
       createdAt: createdAt,
       replyToMessageId: data['replyToMessageId']?.toString(),
       isDeleted: (data['isDeleted'] as bool?) ?? false,
-      isLocal: isLocal,
+      isLocal: false,
+      delivered: delivered,
+      deliveredAt: deliveredAt,
+      expiresAt: expiresAt,
+      sendState: 'sent',
+      sendAttempts: 0,
     );
   }
 
-  Map<String, dynamic> toMapForSend() {
-    return {
+  /// Map used to send to Firestore (serverTimestamp for createdAt)
+  Map<String, dynamic> toMapForSend({Duration? ttl}) {
+    final Map<String, dynamic> m = {
       'text': text,
       'senderId': senderId,
       'createdAt': FieldValue.serverTimestamp(),
       'replyToMessageId': replyToMessageId,
       'isDeleted': isDeleted,
+      'delivered': false,
+      'conversationId': conversationId,
     };
+    if (ttl != null) {
+      final expiry = DateTime.now().toUtc().add(ttl);
+      m['expiresAt'] = Timestamp.fromDate(expiry);
+    }
+    return m;
+  }
+
+  /// Map for local DB upsert
+  Map<String, Object?> toLocalMap() {
+    return {
+      'id': id,
+      'conversationId': conversationId,
+      'text': text,
+      'senderId': senderId,
+      'createdAt': createdAt.millisecondsSinceEpoch,
+      'replyToMessageId': replyToMessageId,
+      'isDeleted': isDeleted ? 1 : 0,
+      'isLocal': isLocal ? 1 : 0,
+      'delivered': delivered ? 1 : 0,
+      'deliveredAt': deliveredAt?.millisecondsSinceEpoch,
+      'expiresAt': expiresAt?.millisecondsSinceEpoch,
+      'sendState': sendState,
+      'sendAttempts': sendAttempts,
+    };
+  }
+
+  /// Create ChatMessage from local DB row
+  factory ChatMessage.fromLocal(Map<String, Object?> row) {
+    final createdAtMillis = (row['createdAt'] as int?) ?? DateTime.now().millisecondsSinceEpoch;
+    final deliveredAtMillis = (row['deliveredAt'] as int?);
+    final expiresAtMillis = (row['expiresAt'] as int?);
+    return ChatMessage(
+      id: (row['id'] as String),
+      conversationId: (row['conversationId'] as String),
+      text: (row['text'] as String),
+      senderId: (row['senderId'] as String),
+      createdAt: Timestamp.fromMillisecondsSinceEpoch(createdAtMillis),
+      replyToMessageId: (row['replyToMessageId'] as String?),
+      isDeleted: ((row['isDeleted'] as int?) ?? 0) == 1,
+      isLocal: ((row['isLocal'] as int?) ?? 0) == 1,
+      delivered: ((row['delivered'] as int?) ?? 0) == 1,
+      deliveredAt: deliveredAtMillis != null ? Timestamp.fromMillisecondsSinceEpoch(deliveredAtMillis) : null,
+      expiresAt: expiresAtMillis != null ? Timestamp.fromMillisecondsSinceEpoch(expiresAtMillis) : null,
+      sendState: (row['sendState'] as String?) ?? 'sent',
+      sendAttempts: (row['sendAttempts'] as int?) ?? 0,
+    );
+  }
+
+  ChatMessage copyWith({
+    String? sendState,
+    int? sendAttempts,
+    bool? delivered,
+    Timestamp? deliveredAt,
+    bool? isLocal,
+  }) {
+    return ChatMessage(
+      id: id,
+      conversationId: conversationId,
+      text: text,
+      senderId: senderId,
+      createdAt: createdAt,
+      replyToMessageId: replyToMessageId,
+      isDeleted: isDeleted,
+      isLocal: isLocal ?? this.isLocal,
+      delivered: delivered ?? this.delivered,
+      deliveredAt: deliveredAt ?? this.deliveredAt,
+      expiresAt: expiresAt,
+      sendState: sendState ?? this.sendState,
+      sendAttempts: sendAttempts ?? this.sendAttempts,
+    );
   }
 }
 
+/// -----------------------------
+/// Local DB helper (sqflite)
+/// -----------------------------
+class LocalChatDb {
+  static const _dbName = 'qleon_chat_local.db';
+  static const _dbVersion = 2; // bumped because we add columns
+  static Database? _db;
+
+  static Future<void> init() async {
+    if (_db != null) return;
+    final Directory documentsDirectory = await getApplicationDocumentsDirectory();
+    final path = p.join(documentsDirectory.path, _dbName);
+    _db = await openDatabase(path, version: _dbVersion, onCreate: (db, ver) async {
+      await db.execute('''
+        CREATE TABLE messages (
+          id TEXT PRIMARY KEY,
+          conversationId TEXT,
+          text TEXT,
+          senderId TEXT,
+          createdAt INTEGER,
+          replyToMessageId TEXT,
+          isDeleted INTEGER DEFAULT 0,
+          isLocal INTEGER DEFAULT 0,
+          delivered INTEGER DEFAULT 0,
+          deliveredAt INTEGER,
+          expiresAt INTEGER,
+          sendState TEXT DEFAULT 'sent',
+          sendAttempts INTEGER DEFAULT 0
+        );
+      ''');
+      await db.execute('CREATE INDEX idx_conv_createdAt ON messages(conversationId, createdAt);');
+      await db.execute('CREATE INDEX idx_conv_sendState ON messages(conversationId, sendState);');
+    }, onUpgrade: (db, oldV, newV) async {
+      // simple migration: if upgrading from v1 -> v2, add columns
+      if (oldV < 2) {
+        try {
+          await db.execute("ALTER TABLE messages ADD COLUMN sendState TEXT DEFAULT 'sent';");
+          await db.execute("ALTER TABLE messages ADD COLUMN sendAttempts INTEGER DEFAULT 0;");
+          await db.execute('CREATE INDEX IF NOT EXISTS idx_conv_sendState ON messages(conversationId, sendState);');
+        } catch (e) {
+          debugPrint('[LocalChatDb] migration v1->v2 failed: $e');
+        }
+      }
+    });
+  }
+
+  static Future<void> close() async {
+    await _db?.close();
+    _db = null;
+  }
+
+  static Database get db {
+    if (_db == null) throw StateError('Local DB not initialized. Call LocalChatDb.init() first.');
+    return _db!;
+  }
+
+  static Future<void> upsertMessage(ChatMessage m) async {
+    await db.insert(
+      'messages',
+      m.toLocalMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  static Future<List<ChatMessage>> getMessagesForConversation(String conversationId) async {
+    final rows = await db.query(
+      'messages',
+      where: 'conversationId = ?',
+      whereArgs: [conversationId],
+      orderBy: 'createdAt ASC',
+    );
+    return rows.map((r) => ChatMessage.fromLocal(r)).toList();
+  }
+
+  static Future<List<ChatMessage>> getPendingMessages(String conversationId, {int maxAttempts = 10}) async {
+    final rows = await db.query(
+      'messages',
+      where: 'conversationId = ? AND sendState IN (?, ?) AND sendAttempts < ?',
+      whereArgs: [conversationId, 'pending', 'failed', maxAttempts],
+      orderBy: 'createdAt ASC',
+    );
+    return rows.map((r) => ChatMessage.fromLocal(r)).toList();
+  }
+
+  static Future<void> updateSendState(String conversationId, String messageId, String sendState, {int? sendAttempts}) async {
+    final map = <String, Object?>{'sendState': sendState};
+    if (sendAttempts != null) map['sendAttempts'] = sendAttempts;
+    await db.update('messages', map, where: 'id = ? AND conversationId = ?', whereArgs: [messageId, conversationId]);
+  }
+
+  static Future<void> markDelivered(String conversationId, String messageId, {Timestamp? deliveredAt}) async {
+    final map = <String, Object?>{'delivered': 1};
+    if (deliveredAt != null) map['deliveredAt'] = deliveredAt.millisecondsSinceEpoch;
+    await db.update('messages', map, where: 'id = ? AND conversationId = ?', whereArgs: [messageId, conversationId]);
+  }
+
+  static Future<void> deleteExpiredMessages(String conversationId, int beforeMillis) async {
+    await db.delete('messages', where: 'conversationId = ? AND expiresAt IS NOT NULL AND expiresAt < ?', whereArgs: [conversationId, beforeMillis]);
+  }
+}
+
+/// -----------------------------
+/// ChatRoomViewModel
+/// -----------------------------
 class ChatRoomViewModel extends ChangeNotifier {
-  String conversationId; // may be adjusted to canonical uid-based id during init
+  String conversationId; // may be canonicalized
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   StreamSubscription<QuerySnapshot>? _sub; // canonical listener
-  StreamSubscription<QuerySnapshot>? _legacySub; // legacy doc listener (if any)
+  StreamSubscription<QuerySnapshot>? _legacySub; // legacy listener
 
   // exposed
   List<ChatMessage> messages = [];
@@ -73,23 +284,24 @@ class ChatRoomViewModel extends ChangeNotifier {
   bool isSending = false;
   String? errorMessage;
 
-  // internal map to merge messages from multiple listeners, key = msgId (chosen canonical id)
-  final Map<String, ChatMessage> _messagesMap = {};
-
-  // fingerprint (sender_ts_text) -> chosenDocId
-  final Map<String, String> _fingerprintIndex = {};
-
-  // docId -> fingerprint (reverse map) to allow updates/removals
+  // internal maps for merging/dedupe
+  final Map<String, ChatMessage> _messagesMap = {}; // docId -> ChatMessage
+  final Map<String, String> _fingerprintIndex = {}; // fingerprint -> docId
   final Map<String, String> _idToFingerprint = {};
-
-  // legacy duplicate counters: convId -> consecutive duplicate-only snapshot count
   final Map<String, int> _legacyDuplicateCounter = {};
 
-  ChatRoomViewModel({required this.conversationId});
+  // config: default TTL for messages in Firestore (client sets expiresAt as now + ttl)
+  final Duration messageTTL;
 
-  // ===== lifecycle =====
+  // internal guard to prevent reentrant ACK loops
+  final Set<String> _ackInProgress = {};
+
+  ChatRoomViewModel({required this.conversationId, this.messageTTL = const Duration(days: 3)});
+
+  // ---------------- lifecycle ----------------
   Future<void> init() async {
-    if (_sub != null || _legacySub != null) return; // already listening
+    if (_sub != null || _legacySub != null) return;
+    await LocalChatDb.init();
 
     final originalConversationId = conversationId;
     debugPrint('[ChatVM] init() start conversationId=$conversationId');
@@ -98,15 +310,10 @@ class ChatRoomViewModel extends ChangeNotifier {
       final currentUid = FirebaseAuth.instance.currentUser?.uid;
 
       if (currentUid != null) {
-        // Resolve incoming id:
-        // Cases:
-        //  - incoming is canonical (uidA_uidB or maybe publicId_publicId)
-        //  - incoming is single otherUid/publicId -> treat as other and compute canonical
         final parts = conversationId.split('_');
         final looksCanonical = parts.length == 2 && parts[0].isNotEmpty && parts[1].isNotEmpty;
 
         if (looksCanonical) {
-          // Try resolving both parts to uids (if either is a publicId like 0x...)
           final resolvedA = await _resolveToUidIfNeeded(parts[0]);
           final resolvedB = await _resolveToUidIfNeeded(parts[1]);
 
@@ -116,7 +323,6 @@ class ChatRoomViewModel extends ChangeNotifier {
             if (canonical != conversationId) {
               debugPrint('[ChatVM] resolved canonical (from parts) -> $canonical (was $conversationId)');
               conversationId = canonical;
-              // ensure canonical doc exists and has proper members
               await _firestore.collection('conversations').doc(conversationId).set({
                 'members': [sorted[0], sorted[1]],
                 'isGroup': false,
@@ -124,7 +330,6 @@ class ChatRoomViewModel extends ChangeNotifier {
               }, SetOptions(merge: true));
             }
           } else {
-            // Could not resolve both parts to uids; fallback: if one part is currentUid, try to find a conversation doc that has both
             if (parts.contains(currentUid)) {
               final otherCandidate = (parts[0] == currentUid) ? parts[1] : parts[0];
               final found = await _findConversationWithMembers(currentUid, otherCandidate);
@@ -132,18 +337,15 @@ class ChatRoomViewModel extends ChangeNotifier {
                 debugPrint('[ChatVM] found conversation by members -> $found (legacy source: $conversationId)');
                 conversationId = found;
               } else {
-                // leave conversationId as-is (legacy doc). We'll still listen to it and attempt to canonicalize later.
                 debugPrint('[ChatVM] keeping legacy conversationId=$conversationId (not resolvable to uid pair)');
               }
             }
           }
         } else {
-          // treat conversationId as otherUid/publicId
           final otherResolved = await _resolveToUidIfNeeded(conversationId);
           if (otherResolved != null) {
             final sorted = [currentUid, otherResolved]..sort();
             final canonical = '${sorted[0]}_${sorted[1]}';
-            // if canonical exists use it otherwise create it (merge)
             final canonicalSnap = await _firestore.collection('conversations').doc(canonical).get();
             if (canonicalSnap.exists) {
               debugPrint('[ChatVM] canonical found $canonical (from otherResolved)');
@@ -159,7 +361,6 @@ class ChatRoomViewModel extends ChangeNotifier {
               }, SetOptions(merge: true));
             }
           } else {
-            // cannot resolve other -> leave as provided (likely a legacy id)
             debugPrint('[ChatVM] otherId ${conversationId} could not be resolved to uid - keeping as legacy id');
           }
         }
@@ -167,9 +368,25 @@ class ChatRoomViewModel extends ChangeNotifier {
         debugPrint('[ChatVM] currentUser null during init(), will listen to provided conversationId as-is');
       }
 
-      // At this point: conversationId may have changed to canonical uid pair.
-      // We'll listen to canonical doc and ALSO listen to originalConversationId if different (legacy).
+      // Start listeners: canonical + legacy (if original differs)
       await _startListeners(canonicalId: conversationId, legacyId: (originalConversationId == conversationId) ? null : originalConversationId);
+
+      // Load local messages to show immediately
+      await _loadLocalMessages();
+
+      // cleanup expired local messages for this conversation (best-effort)
+      try {
+        final beforeMillis = DateTime.now().toUtc().millisecondsSinceEpoch;
+        await LocalChatDb.deleteExpiredMessages(conversationId, beforeMillis);
+      } catch (e) {
+        debugPrint('[ChatVM] local cleanup expired failed: $e');
+      }
+
+      // Try to sync pending messages (upload queue) on init
+      unawaited(_syncPendingMessages());
+
+      isLoading = false;
+      notifyListeners();
     } catch (e, st) {
       errorMessage = e.toString();
       isLoading = false;
@@ -178,15 +395,27 @@ class ChatRoomViewModel extends ChangeNotifier {
     }
   }
 
+  Future<void> _loadLocalMessages() async {
+    try {
+      final local = await LocalChatDb.getMessagesForConversation(conversationId);
+      // merge into map and rebuild
+      for (final m in local) {
+        _messagesMap[m.id] = m;
+        final fp = _makeFingerprint(m);
+        _fingerprintIndex.putIfAbsent(fp, () => m.id);
+        _idToFingerprint[m.id] = fp;
+      }
+      _rebuildMessagesFromMap();
+    } catch (e) {
+      debugPrint('[ChatVM] error loading local messages: $e');
+    }
+  }
+
   Future<void> _startListeners({required String canonicalId, String? legacyId}) async {
-    // clear previous map & messages
-    _messagesMap.clear();
+    // clear in-memory caches for a fresh start (do not delete local DB)
     _fingerprintIndex.clear();
     _idToFingerprint.clear();
     _legacyDuplicateCounter.clear();
-    messages = [];
-    isLoading = true;
-    notifyListeners();
 
     // canonical listener
     final collRef = _firestore.collection('conversations').doc(canonicalId).collection('messages');
@@ -194,18 +423,16 @@ class ChatRoomViewModel extends ChangeNotifier {
       _applySnapshotToMap(snap, convId: canonicalId, isLegacy: false);
     }, onError: (e, st) {
       errorMessage = e.toString();
-      isLoading = false;
       notifyListeners();
       debugPrint('[ChatVM] canonical listener error: $e\n$st');
     });
 
-    // legacy listener (only if provided and different from canonical)
+    // legacy listener only if provided & different
     if (legacyId != null && legacyId.isNotEmpty && legacyId != canonicalId) {
       final legacyRef = _firestore.collection('conversations').doc(legacyId).collection('messages');
       _legacySub = legacyRef.orderBy('createdAt', descending: false).snapshots().listen((snap) {
         _applySnapshotToMap(snap, convId: legacyId, isLegacy: true);
       }, onError: (e, st) {
-        // non-fatal: legacy may not exist
         debugPrint('[ChatVM] legacy listener error for $legacyId: $e');
       });
       debugPrint('[ChatVM] listening to legacy doc $legacyId and canonical $canonicalId');
@@ -214,81 +441,103 @@ class ChatRoomViewModel extends ChangeNotifier {
     }
   }
 
+  /// Apply snapshot into local in-memory map, persist novel messages to local DB,
+  /// and send ACK for messages received by this device.
   void _applySnapshotToMap(QuerySnapshot snap, {required String convId, required bool isLegacy}) {
     var changed = false;
     var novelFound = false;
 
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+
     for (final doc in snap.docs) {
-      final cm = ChatMessage.fromDoc(doc);
+      // safe parsing: wrap in try/catch per doc
+      ChatMessage cm;
+      try {
+        cm = ChatMessage.fromDoc(doc, conversationIdOverride: convId);
+      } catch (e) {
+        debugPrint('[ChatVM] parse error for doc ${doc.id}: $e');
+        continue;
+      }
+
       final fp = _makeFingerprint(cm);
 
-      // if we already have an entry with same doc id -> update it and update fingerprint mapping
+      // If we already have a message with same doc id -> update it
       if (_messagesMap.containsKey(cm.id)) {
         final prev = _messagesMap[cm.id]!;
         final prevFp = _idToFingerprint[cm.id];
-        // if content/timestamp changed, update map
-        if (prev.createdAt.millisecondsSinceEpoch != cm.createdAt.millisecondsSinceEpoch || prev.text != cm.text || prev.isDeleted != cm.isDeleted) {
+        if (prev.createdAt.millisecondsSinceEpoch != cm.createdAt.millisecondsSinceEpoch ||
+            prev.text != cm.text ||
+            prev.isDeleted != cm.isDeleted ||
+            prev.delivered != cm.delivered) {
           _messagesMap[cm.id] = cm;
           changed = true;
         }
-        // update fingerprint map if changed
         if (prevFp != fp) {
           if (prevFp != null) _fingerprintIndex.remove(prevFp);
           _fingerprintIndex[fp] = cm.id;
           _idToFingerprint[cm.id] = fp;
         }
-        // this doc id existed so it's not 'novel' in sense of fingerprint; but it could be changed -> treat as changed already
+        // persist latest into local DB (upsert) - this will replace optimistic entry if id matches
+        _persistToLocal(cm);
+        // maybe ACK if needed
+        _maybeAcknowledgeIfNeeded(cm, convId: convId, currentUid: currentUid);
         continue;
       }
 
-      // If fingerprint already maps to an existing id -> treat them as same message, update that existing entry
+      // If fingerprint already mapped => treat as duplicate message (different doc id)
       if (_fingerprintIndex.containsKey(fp)) {
         final existingId = _fingerprintIndex[fp]!;
         final existing = _messagesMap[existingId];
         if (existing == null) {
-          // mapping stale; replace mapping to this doc id
+          // stale mapping: replace mapping with this doc
           _messagesMap[cm.id] = cm;
           _fingerprintIndex[fp] = cm.id;
           _idToFingerprint[cm.id] = fp;
           changed = true;
           novelFound = true;
+          _persistToLocal(cm);
+          _maybeAcknowledgeIfNeeded(cm, convId: convId, currentUid: currentUid);
           continue;
         }
 
-        // We already have a canonical doc id for this fingerprint.
-        // Prefer to keep the earlier doc id (existingId). Update its content if incoming doc is newer or different.
-        final shouldReplaceExisting =
-            cm.createdAt.millisecondsSinceEpoch > existing.createdAt.millisecondsSinceEpoch || cm.text != existing.text || cm.isDeleted != existing.isDeleted;
-        if (shouldReplaceExisting) {
+        // Decide whether to replace existing entry content (prefer newer createdAt)
+        final shouldReplace =
+            cm.createdAt.millisecondsSinceEpoch > existing.createdAt.millisecondsSinceEpoch ||
+                cm.text != existing.text ||
+                cm.isDeleted != existing.isDeleted;
+        if (shouldReplace) {
           _messagesMap[existingId] = cm;
           _idToFingerprint[existingId] = fp;
           changed = true;
         }
-        // Do not add cm.id to _messagesMap to avoid duplicate entry.
+        // Persist latest to local DB and ACK if needed
+        _persistToLocal(cm);
+        _maybeAcknowledgeIfNeeded(cm, convId: convId, currentUid: currentUid);
         continue;
       }
 
-      // New fingerprint & new doc id -> insert
+      // New message (fingerprint + docId)
       _messagesMap[cm.id] = cm;
       _fingerprintIndex[fp] = cm.id;
       _idToFingerprint[cm.id] = fp;
       changed = true;
       novelFound = true;
+
+      _persistToLocal(cm);
+      _maybeAcknowledgeIfNeeded(cm, convId: convId, currentUid: currentUid);
     }
 
-    // Legacy listener heuristic: if legacy snapshots repeatedly produce NO novel messages, cancel legacy listener
+    // Heuristic: if legacy only produces duplicates repeatedly, cancel it
     if (isLegacy) {
       final cnt = _legacyDuplicateCounter[convId] ?? 0;
       if (!novelFound) {
         final next = cnt + 1;
         _legacyDuplicateCounter[convId] = next;
         if (next >= 2) {
-          // stop legacy listener - canonical should handle messages going forward
           debugPrint('[ChatVM] legacy listener $convId produced only duplicates $next times - cancelling legacy listener');
           _cancelLegacyListener(convId);
         }
       } else {
-        // reset counter if we saw a novel message
         _legacyDuplicateCounter[convId] = 0;
       }
     }
@@ -305,11 +554,62 @@ class ChatRoomViewModel extends ChangeNotifier {
     }
   }
 
+  /// Persist message to local DB (upsert). Runs best-effort (non-blocking for UI).
+  void _persistToLocal(ChatMessage m) {
+    LocalChatDb.upsertMessage(m).catchError((e) {
+      debugPrint('[ChatVM] local persist failed for ${m.id}: $e');
+    });
+  }
+
+  /// Acknowledge message: if we are the recipient and message not yet delivered, set delivered true.
+  void _maybeAcknowledgeIfNeeded(ChatMessage m, {required String convId, String? currentUid}) {
+    try {
+      currentUid ??= FirebaseAuth.instance.currentUser?.uid;
+      if (currentUid == null) return;
+      // don't ACK our own messages
+      if (m.senderId == currentUid) return;
+      if (m.isDeleted) return;
+      if (m.delivered) return; // already delivered according to server
+
+      // avoid duplicate ACK attempts for same doc
+      final ackKey = '$convId::${m.id}';
+      if (_ackInProgress.contains(ackKey)) return;
+
+      _ackInProgress.add(ackKey);
+
+      // mark delivered on server (idempotent update)
+      _firestore
+          .collection('conversations')
+          .doc(convId)
+          .collection('messages')
+          .doc(m.id)
+          .set({
+            'delivered': true,
+            'deliveredAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true))
+          .then((_) async {
+            // reflect delivered flag in local DB
+            final nowTs = Timestamp.now();
+            await LocalChatDb.markDelivered(convId, m.id, deliveredAt: nowTs);
+          })
+          .catchError((e) {
+            debugPrint('[ChatVM] ACK failed for ${m.id}: $e');
+          })
+          .whenComplete(() {
+            _ackInProgress.remove(ackKey);
+          });
+    } catch (e) {
+      debugPrint('[ChatVM] _maybeAcknowledgeIfNeeded error: $e');
+    }
+  }
+
   String _makeFingerprint(ChatMessage m) {
-    // normalize text whitespace to avoid tiny variations creating new fingerprint.
-    final normalizedText = (m.text).trim();
+    // fingerprint uses normalized (trimmed, collapsed whitespace) text + sender + createdAt
+    final normalizedText = _normalizeWhitespace(m.text);
     return '${m.senderId}_${m.createdAt.millisecondsSinceEpoch}_$normalizedText';
   }
+
+  String _normalizeWhitespace(String s) => s.replaceAll(RegExp(r'\s+'), ' ').trim();
 
   Future<void> _cancelLegacyListener(String legacyConvId) async {
     if (_legacySub == null) return;
@@ -317,29 +617,23 @@ class ChatRoomViewModel extends ChangeNotifier {
       await _legacySub!.cancel();
     } catch (_) {}
     _legacySub = null;
-    // remove duplicate counter entry
     _legacyDuplicateCounter.remove(legacyConvId);
-    // we also remove fingerprint mappings that point to documents under legacyConvId
-    // (best-effort) - this is optional, keep safe: do not delete messagesMap entries; they remain.
+    debugPrint('[ChatVM] legacy listener cancelled for $legacyConvId');
+    // intentionally DO NOT remove messages from in-memory map or local DB
   }
 
   /// Try to resolve possibly publicId (like "0xABCD") to uid.
-  /// If `part` already looks like a uid (exists as users doc id) returns it.
-  /// If `part` looks like a public id (startsWith "0x") tries to query users where name == part.
-  /// Returns null if cannot resolve.
   Future<String?> _resolveToUidIfNeeded(String part) async {
     try {
       if (part.isEmpty) return null;
-      // quick check: if user doc exists with id == part, treat it as uid
+      // quick check: if user doc exists with id == part, treat as uid
       final doc = await _firestore.collection('users').doc(part).get();
       if (doc.exists) {
-        // doc may contain 'uid' field or doc.id is uid
         final data = doc.data();
         if (data != null && data.containsKey('uid')) return (data['uid'] as String?) ?? doc.id;
         return doc.id;
       }
 
-      // if looks like publicId (0x...) try to query by name field
       if (part.startsWith('0x')) {
         final q = await _firestore.collection('users').where('name', isEqualTo: part).limit(1).get();
         if (q.docs.isNotEmpty) {
@@ -348,8 +642,6 @@ class ChatRoomViewModel extends ChangeNotifier {
           return q.docs.first.id;
         }
       }
-
-      // Not resolved
       return null;
     } catch (e) {
       debugPrint('[ChatVM] _resolveToUidIfNeeded error for $part: $e');
@@ -357,16 +649,9 @@ class ChatRoomViewModel extends ChangeNotifier {
     }
   }
 
-  /// Try to find a conversation doc id that has both members (currentUid & otherCandidate)
-  /// Returns doc.id if found, otherwise null.
   Future<String?> _findConversationWithMembers(String currentUid, String otherCandidate) async {
     try {
-      final q = await _firestore
-          .collection('conversations')
-          .where('members', arrayContains: currentUid)
-          .limit(200)
-          .get();
-
+      final q = await _firestore.collection('conversations').where('members', arrayContains: currentUid).limit(200).get();
       for (final d in q.docs) {
         final members = (d.data()['members'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [];
         if (members.contains(currentUid) && members.contains(otherCandidate)) {
@@ -389,20 +674,27 @@ class ChatRoomViewModel extends ChangeNotifier {
     super.dispose();
   }
 
-  // ===== messaging =====
-  /// Send message and ensure conversation doc exists (merge). SenderId is UID (no fallback).
+  // ---------------- messaging ----------------
+
+  /// Generate a reasonably-unique local id (safe without external uuid package)
+  String _generateLocalId(String senderUid) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final rnd = Random().nextInt(1 << 31);
+    final short = senderUid.isNotEmpty ? senderUid.substring(0, min(6, senderUid.length)) : 'anon';
+    return 'loc_${short}_$now\_$rnd';
+  }
+
+  /// Send message: local-first (save to local DB, optimistic UI), then upload to Firestore using the SAME id.
+  /// If upload fails, mark sendState 'failed' and increment attempts; pending messages are retried by _syncPendingMessages().
   Future<void> sendTextMessage(String text, {String? replyToMessageId}) async {
     final user = FirebaseAuth.instance.currentUser;
     final senderUid = user?.uid;
-    if (senderUid == null) {
-      throw StateError('User not authenticated');
-    }
-    final senderId = senderUid; // force using uid
+    if (senderUid == null) throw StateError('User not authenticated');
 
     isSending = true;
     notifyListeners();
 
-    // ensure conversationId is canonical (try to resolve parts that look like publicId)
+    // ensure conversation canonicalization for publicId parts
     final parts = conversationId.split('_');
     if (parts.length == 2 && (parts[0].startsWith('0x') || parts[1].startsWith('0x'))) {
       final r0 = await _resolveToUidIfNeeded(parts[0]) ?? parts[0];
@@ -414,76 +706,149 @@ class ChatRoomViewModel extends ChangeNotifier {
       }
     }
 
-    final convRef = _firestore.collection('conversations').doc(conversationId);
-    final msgRef = convRef.collection('messages').doc();
-
-    // local optimistic message
-    final local = ChatMessage(
-      id: msgRef.id,
+    // create local id and local ChatMessage (include expiresAt), mark sendState = 'pending'
+    final localId = _generateLocalId(senderUid);
+    final expiresTs = Timestamp.fromDate(DateTime.now().toUtc().add(messageTTL));
+    final localMsg = ChatMessage(
+      id: localId,
+      conversationId: conversationId,
       text: text,
-      senderId: senderId,
+      senderId: senderUid,
       createdAt: Timestamp.now(),
       replyToMessageId: replyToMessageId,
       isLocal: true,
+      delivered: false,
+      expiresAt: expiresTs,
+      sendState: 'pending',
+      sendAttempts: 0,
     );
 
-    // put into internal map & rebuild messages (also add fingerprint)
-    final fp = _makeFingerprint(local);
-    _messagesMap[local.id] = local;
-    _fingerprintIndex[fp] = local.id;
-    _idToFingerprint[local.id] = fp;
+    // optimistic: insert into in-memory map + persist local DB + UI
+    final fp = _makeFingerprint(localMsg);
+    _messagesMap[localMsg.id] = localMsg;
+    _fingerprintIndex[fp] = localMsg.id;
+    _idToFingerprint[localMsg.id] = fp;
     _rebuildMessagesFromMap();
 
+    await LocalChatDb.upsertMessage(localMsg); // persist before attempting upload
+    notifyListeners();
+
     try {
-      // Ensure conversation exists: add both members when possible.
+      // ensure conversation doc members updated (best-effort)
+      final convRef = _firestore.collection('conversations').doc(conversationId);
       final parts2 = conversationId.split('_');
       if (parts2.length == 2 && parts2[0].isNotEmpty && parts2[1].isNotEmpty) {
-        final other = (parts2[0] == senderUid) ? parts2[1] : parts2[0];
-        // If other looks like publicId, try to resolve it to uid before writing members
-        String otherResolved = other;
+        var other = (parts2[0] == senderUid) ? parts2[1] : parts2[0];
         if (other.startsWith('0x')) {
           final r = await _resolveToUidIfNeeded(other);
-          if (r != null) otherResolved = r;
+          if (r != null) other = r;
         }
         await convRef.set({
-          'members': FieldValue.arrayUnion([senderUid, otherResolved]),
+          'members': FieldValue.arrayUnion([senderUid, other]),
           'lastUpdated': FieldValue.serverTimestamp(),
         }, SetOptions(merge: true));
       } else {
-        // unknown id format: ensure sender is at least recorded
         await convRef.set({
           'members': FieldValue.arrayUnion([senderUid]),
           'lastUpdated': FieldValue.serverTimestamp(),
         }, SetOptions(merge: true));
       }
 
-      await msgRef.set(local.toMapForSend());
-      // server copy will come through snapshots and replace local placeholder (same id)
-    } catch (e) {
-      // remove optimistic local message on failure
-      final prevFp = _idToFingerprint.remove(local.id);
-      if (prevFp != null) _fingerprintIndex.remove(prevFp);
-      _messagesMap.remove(local.id);
+      // attempt immediate upload (idempotent set)
+      final msgRef = convRef.collection('messages').doc(localMsg.id);
+      await msgRef.set(localMsg.toMapForSend(ttl: messageTTL));
+      // note: snapshot will replace the local placeholder with server copy (same id)
+      // update local sendState to 'sending' (best-effort) - actual 'sent' will be via snapshot/server-existence
+      await LocalChatDb.updateSendState(conversationId, localMsg.id, 'sending', sendAttempts: 1);
+    } catch (e, st) {
+      // mark failed & increment attempts (do not remove local placeholder)
+      final failedAttempts = localMsg.sendAttempts + 1;
+      await LocalChatDb.updateSendState(conversationId, localMsg.id, 'failed', sendAttempts: failedAttempts);
+      // update in-memory map too
+      final updatedLocal = localMsg.copyWith(sendState: 'failed', sendAttempts: failedAttempts);
+      _messagesMap[localMsg.id] = updatedLocal;
       _rebuildMessagesFromMap();
       errorMessage = e.toString();
-      notifyListeners();
-      rethrow;
+      debugPrint('[ChatVM] sendTextMessage error: $e\n$st');
+      // do not rethrow: keep UI responsive and rely on sync queue
     } finally {
       isSending = false;
       notifyListeners();
     }
   }
 
+  /// Attempts to upload pending/failed messages from local DB.
+  /// Call on init, on app resume, or on connectivity regained.
+  Future<void> _syncPendingMessages({int maxAttempts = 5}) async {
+    try {
+      final pending = await LocalChatDb.getPendingMessages(conversationId, maxAttempts: maxAttempts);
+      if (pending.isEmpty) return;
+
+      debugPrint('[ChatVM] syncing ${pending.length} pending messages for $conversationId');
+
+      for (final m in pending) {
+        // optimistic update sendState -> 'sending'
+        await LocalChatDb.updateSendState(conversationId, m.id, 'sending', sendAttempts: m.sendAttempts + 1);
+        final convRef = _firestore.collection('conversations').doc(conversationId);
+        final msgRef = convRef.collection('messages').doc(m.id);
+        try {
+          await msgRef.set(m.toMapForSend(ttl: messageTTL));
+          // best-effort: mark as 'sending' (server snapshot will mark 'sent')
+          // local DB will be updated by snapshot/upsert; still mark sendState to 'sending' here:
+          await LocalChatDb.updateSendState(conversationId, m.id, 'sending', sendAttempts: m.sendAttempts + 1);
+        } catch (e) {
+          // mark failed, will be retried later
+          final attempts = m.sendAttempts + 1;
+          final newState = attempts >= maxAttempts ? 'failed' : 'failed';
+          await LocalChatDb.updateSendState(conversationId, m.id, newState, sendAttempts: attempts);
+          debugPrint('[ChatVM] _syncPendingMessages upload failed for ${m.id}: $e');
+        }
+      }
+
+      // reload local messages into memory to reflect state changes
+      await _loadLocalMessages();
+      notifyListeners();
+    } catch (e) {
+      debugPrint('[ChatVM] _syncPendingMessages error: $e');
+    }
+  }
+
+  /// Public method you can call from app lifecycle hooks (e.g. onResume) or connectivity listener
+  Future<void> syncPendingMessages() async => _syncPendingMessages();
+
   void _rebuildMessagesFromMap() {
     final list = _messagesMap.values.toList()
-      ..sort((a, b) => a.createdAt.toDate().millisecondsSinceEpoch.compareTo(b.createdAt.toDate().millisecondsSinceEpoch));
+      ..sort((a, b) => a.createdAt.millisecondsSinceEpoch.compareTo(b.createdAt.millisecondsSinceEpoch));
     messages = list;
     notifyListeners();
   }
 
   Future<void> softDeleteMessage(String messageId) async {
     try {
-      await _firestore.collection('conversations').doc(conversationId).collection('messages').doc(messageId).update({'isDeleted': true});
+      await _firestore.collection('conversations').doc(conversationId).collection('messages').doc(messageId).set({'isDeleted': true, 'lastUpdated': FieldValue.serverTimestamp()}, SetOptions(merge: true));
+      // optimistic local update
+      final local = _messagesMap[messageId];
+      if (local != null) {
+        final updated = local.copyWith(isLocal: local.isLocal, sendState: local.sendState);
+        final replaced = ChatMessage(
+          id: local.id,
+          conversationId: local.conversationId,
+          text: local.text,
+          senderId: local.senderId,
+          createdAt: local.createdAt,
+          replyToMessageId: local.replyToMessageId,
+          isDeleted: true,
+          isLocal: local.isLocal,
+          delivered: local.delivered,
+          deliveredAt: local.deliveredAt,
+          expiresAt: local.expiresAt,
+          sendState: local.sendState,
+          sendAttempts: local.sendAttempts,
+        );
+        _messagesMap[messageId] = replaced;
+        LocalChatDb.upsertMessage(replaced).catchError((e) => debugPrint('[ChatVM] local soft-delete failed $e'));
+        _rebuildMessagesFromMap();
+      }
     } catch (e) {
       errorMessage = e.toString();
       notifyListeners();
@@ -511,13 +876,10 @@ class ChatRoomViewModel extends ChangeNotifier {
   }
 
   ChatMessage? findMessageById(String id) {
-    try {
-      return messages.firstWhere((m) => m.id == id);
-    } catch (_) {
-      return null;
-    }
+    return _messagesMap[id];
   }
 
+  /// Return a Firestore-backed stream (if needed elsewhere). Note: prefer local DB for UI.
   Stream<List<ChatMessage>> messagesStream() {
     return _firestore
         .collection('conversations')
@@ -525,6 +887,6 @@ class ChatRoomViewModel extends ChangeNotifier {
         .collection('messages')
         .orderBy('createdAt', descending: false)
         .snapshots()
-        .map((snap) => snap.docs.map(ChatMessage.fromDoc).toList());
+        .map((snap) => snap.docs.map((d) => ChatMessage.fromDoc(d, conversationIdOverride: conversationId)).toList());
   }
 }

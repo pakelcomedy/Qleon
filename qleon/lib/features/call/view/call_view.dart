@@ -16,7 +16,6 @@ class _CallViewState extends State<CallView> with TickerProviderStateMixin {
 
   Timer? _timer;
   Duration _elapsed = Duration.zero;
-  bool _inCall = true;
 
   late final AnimationController _endBtnController;
 
