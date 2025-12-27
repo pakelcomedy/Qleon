@@ -1,3 +1,4 @@
+Capek develop ajg, mending ngegame
 ![IMG-20251222-WA0002](https://github.com/user-attachments/assets/565c597f-bdb7-4c08-8654-af93ef9fdec2)
 ```
 lib/
