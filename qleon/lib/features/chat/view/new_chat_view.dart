@@ -20,7 +20,7 @@ class NewChatView extends StatelessWidget {
 }
 
 class _NewChatBody extends StatelessWidget {
-  const _NewChatBody({super.key});
+  const _NewChatBody();
 
   @override
   Widget build(BuildContext context) {
@@ -54,15 +54,9 @@ class _NewChatBody extends StatelessWidget {
                               try {
                                 // If your ViewModel exposes a helper to create/open a conversation,
                                 // prefer that (e.g. vm.openConversationForContact(contact))
-                                if (vm.openOrCreateConversation != null) {
-                                  // optional: if you added this helper
-                                  conversationId = await vm.openOrCreateConversation!(contact);
-                                } else {
-                                  // fallback: use contact.id as conversation id
-                                  // (Replace if your contact model uses another field)
-                                  conversationId = contact.id;
-                                }
-                              } catch (_) {
+                                // optional: if you added this helper
+                                conversationId = await vm.openOrCreateConversation(contact);
+                                                            } catch (_) {
                                 // Fallback to contact.id if helper absent or failed
                                 conversationId = contact.id;
                               }
@@ -156,12 +150,8 @@ class _NewChatBody extends StatelessWidget {
                   // same assumption: ChatContact has `id`. Replace if different.
                   String conversationId;
                   try {
-                    if (vm.openOrCreateConversation != null) {
-                      conversationId = await vm.openOrCreateConversation!(result);
-                    } else {
-                      conversationId = result.id;
-                    }
-                  } catch (_) {
+                    conversationId = await vm.openOrCreateConversation(result);
+                                    } catch (_) {
                     conversationId = result.id;
                   }
 
@@ -229,7 +219,6 @@ class _ActionTile extends StatelessWidget {
   final VoidCallback onTap;
 
   const _ActionTile({
-    super.key,
     required this.icon,
     required this.title,
     required this.subtitle,
@@ -297,7 +286,6 @@ class _ContactCard extends StatelessWidget {
   final VoidCallback onTap;
 
   const _ContactCard({
-    super.key,
     required this.contact,
     required this.onTap,
   });
@@ -358,7 +346,7 @@ class _ContactCard extends StatelessWidget {
 
 class _IdentityIndicator extends StatelessWidget {
   final bool isOnline;
-  const _IdentityIndicator({super.key, required this.isOnline});
+  const _IdentityIndicator({required this.isOnline});
 
   @override
   Widget build(BuildContext context) {
@@ -378,7 +366,7 @@ class _IdentityIndicator extends StatelessWidget {
 }
 
 class _EmptyContactsPlaceholder extends StatelessWidget {
-  const _EmptyContactsPlaceholder({super.key});
+  const _EmptyContactsPlaceholder();
 
   @override
   Widget build(BuildContext context) {

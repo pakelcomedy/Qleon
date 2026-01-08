@@ -1,19 +1,22 @@
-// chat_room_view.dart
-// Simplified chat UI wired to the simplified ChatRoomViewModel.
-// Changes made (see commit message / doc):
-// - Deletions are local-only in the view: tracked by _locallyDeletedIds set.
-//   This hides message bubbles immediately while persisting a local tombstone in VM.
-// - "Message deleted" placeholder removed — deleted messages are not shown.
-// - Clear chat performs local-only clear (hides all messages and clears local DB).
-// - Removed the startup CircularProgressIndicator: view shows messages immediately
-//   (no blocking loading UI). If you still want a subtle placeholder, adapt below.
+// qleon/lib/features/chat/view/chat_room_view.dart
+// Updated to work with the new ChatRoomViewModel (media sending built-in).
+// - No ChatMediaRoomViewModel required
+// - Uses image_picker, file_picker, geolocator, url_launcher for picking/opening
+// Add these dependencies in pubspec.yaml if not present:
+//   image_picker, file_picker, geolocator, url_launcher, path
+
+import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/foundation.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:path/path.dart' as p;
 
 import '../viewmodel/chat_room_viewmodel.dart';
 import '../../call/view/call_view.dart';
@@ -36,12 +39,10 @@ class _ChatRoomViewState extends State<ChatRoomView> {
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
 
-  // UI-only state:
-  String? _replyToMessageId; // UI chooses which message to reply to; VM keeps messages/selection
+  String? _replyToMessageId;
   int _lastMessagesLength = 0;
   String? _lastError;
 
-  // Tracks messages that the user "deleted" locally in this view (local-only hide)
   final Set<String> _locallyDeletedIds = {};
 
   bool get _selectionMode => vm.selectedMessageIds.isNotEmpty;
@@ -50,15 +51,12 @@ class _ChatRoomViewState extends State<ChatRoomView> {
   @override
   void initState() {
     super.initState();
-
     vm = ChatRoomViewModel(conversationId: widget.conversationId);
 
-    // Initialize VM (network/listener setup belongs in VM)
     vm.init().catchError((e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Init error: $e')));
     });
 
-    // show VM-level error messages (UI only shows them)
     vm.addListener(() {
       final err = vm.errorMessage;
       if (err != null && err != _lastError) {
@@ -81,9 +79,7 @@ class _ChatRoomViewState extends State<ChatRoomView> {
         builder: (_) => widget.isGroup
             ? const GroupDetailView()
             : ContactDetailView(
-                // pass the required conversation id so the viewmodel can resolve contact
                 conversationIdOrId: widget.conversationId,
-                // optional: pass title if your ContactDetailView accepts it
                 title: widget.title,
               ),
       ),
@@ -99,25 +95,17 @@ class _ChatRoomViewState extends State<ChatRoomView> {
     super.dispose();
   }
 
-  void _onTextChanged() {
-    // purely UI: triggers rebuild so send button state updates
-    setState(() {});
-  }
+  void _onTextChanged() => setState(() {});
 
   Future<void> _send() async {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
 
-    // Delegate sending to VM — VM handles persistence/networking/etc.
     try {
       await vm.sendTextMessage(text, replyToMessageId: _replyToMessageId);
       if (!mounted) return;
-
-      // UI response to success:
       _controller.clear();
       _cancelReply();
-
-      // small delay so list updates can settle then scroll
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _scrollToBottom(animated: true);
       });
@@ -128,7 +116,7 @@ class _ChatRoomViewState extends State<ChatRoomView> {
   }
 
   void _scrollToBottom({bool animated = false}) {
-    if (!_scrollController.hasClients) return;
+    if (!_scroll_controller_has_clients_safe()) return;
     final pos = _scrollController.position.maxScrollExtent;
     if (animated) {
       _scrollController.animateTo(pos, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
@@ -137,7 +125,14 @@ class _ChatRoomViewState extends State<ChatRoomView> {
     }
   }
 
-  // Selection operations are VM responsibilities; view only triggers them.
+  bool _scroll_controller_has_clients_safe() {
+    try {
+      return _scrollController.hasClients;
+    } catch (_) {
+      return false;
+    }
+  }
+
   void _startSelection(String messageId) {
     HapticFeedback.lightImpact();
     vm.startSelection(messageId);
@@ -148,23 +143,14 @@ class _ChatRoomViewState extends State<ChatRoomView> {
     vm.toggleSelection(messageId);
   }
 
-  void _clearSelection() {
+  void _clearSelection() => vm.clearSelection();
+
+  void _setReply(String messageId) {
+    setState(() => _replyToMessageId = messageId);
     vm.clearSelection();
   }
 
-  // Reply preview state is UI-only (which message user chose to reply to)
-  void _setReply(String messageId) {
-    setState(() {
-      _replyToMessageId = messageId;
-    });
-    vm.clearSelection(); // selection is a VM concern; clear via VM call
-  }
-
-  void _cancelReply() {
-    setState(() {
-      _replyToMessageId = null;
-    });
-  }
+  void _cancelReply() => setState(() => _replyToMessageId = null);
 
   Future<void> _confirmDeleteSelection() async {
     final count = vm.selectedMessageIds.length;
@@ -177,17 +163,14 @@ class _ChatRoomViewState extends State<ChatRoomView> {
     if (ok == true) {
       final ids = vm.selectedMessageIds.toList();
       try {
-        // LOCAL-ONLY delete: hide immediately in UI and persist tombstone locally via VM.delete().
         setState(() {
           _locallyDeletedIds.addAll(ids);
         });
 
-        // persist local deletion in VM/sqlite (best-effort). Do them sequentially to avoid races.
         for (final id in ids) {
           try {
             await vm.delete(id);
           } catch (e) {
-            // log and continue
             debugPrint('[ChatRoomView] vm.delete failed for $id: $e');
           }
         }
@@ -216,7 +199,6 @@ class _ChatRoomViewState extends State<ChatRoomView> {
           _locallyDeletedIds.addAll(ids);
         });
 
-        // persist full local clear via VM (best-effort)
         try {
           await vm.clear();
         } catch (e) {
@@ -357,7 +339,6 @@ class _ChatRoomViewState extends State<ChatRoomView> {
         IconButton(
           icon: const Icon(Icons.copy, color: Color(0xFF4F46E5)),
           onPressed: () async {
-            // compose copy text from VM-provided messages (UI only)
             final texts = vm.selectedMessageIds
                 .where((id) => !(_locallyDeletedIds.contains(id)))
                 .map((id) => vm.findMessageById(id)?.text ?? '')
@@ -379,13 +360,9 @@ class _ChatRoomViewState extends State<ChatRoomView> {
     return ChangeNotifierProvider<ChatRoomViewModel>.value(
       value: vm,
       child: Consumer<ChatRoomViewModel>(builder: (context, model, _) {
-        // Cleanup locallyDeletedIds: remove ids that no longer exist in the VM local store
         _locallyDeletedIds.removeWhere((id) => !model.messages.any((m) => m.id == id));
-
-        // Build visible messages list by filtering out locally deleted and server-deleted items
         final visibleMessages = model.messages.where((m) => !m.isDeleted && !_locallyDeletedIds.contains(m.id)).toList();
 
-        // auto-scroll on new visible messages (UI behavior)
         if (visibleMessages.length != _lastMessagesLength) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!mounted) return;
@@ -402,8 +379,8 @@ class _ChatRoomViewState extends State<ChatRoomView> {
           body: Column(
             children: [
               Expanded(
-                // NOTE: removed blocking CircularProgressIndicator. We always render the messages list.
                 child: _MessagesListView(
+                  key: const ValueKey('messages_list'),
                   messages: visibleMessages,
                   selectedIds: model.selectedMessageIds,
                   onLongPressSelect: (id) => _startSelection(id),
@@ -507,11 +484,12 @@ class _ChatRoomViewState extends State<ChatRoomView> {
     );
   }
 
+  // Attachment sheet: pick and then delegate to vm.sendImage/sendDocument/sendLocationMessage
   void _openAttachmentSheet() {
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (context) {
+      builder: (ctx) {
         return SafeArea(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -525,30 +503,36 @@ class _ChatRoomViewState extends State<ChatRoomView> {
                       icon: Icons.photo_library,
                       label: 'Gallery',
                       onTap: () async {
-                        Navigator.pop(context);
+                        Navigator.pop(ctx);
                         if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Open gallery (placeholder)')));
+                        await _pickImageFromGallery();
                       },
                     ),
                     _AttachmentTile(
                       icon: Icons.insert_drive_file,
                       label: 'Document',
                       onTap: () async {
-                        Navigator.pop(context);
+                        Navigator.pop(ctx);
                         if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Open documents (placeholder)')));
+                        await _pickDocument();
                       },
                     ),
                     _AttachmentTile(
                       icon: Icons.location_on,
                       label: 'Location',
-                      onTap: () {
-                        Navigator.pop(context);
+                      onTap: () async {
+                        Navigator.pop(ctx);
                         if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Pick location (placeholder)')));
+                        await _pickLocationAndSend();
                       },
                     ),
                   ],
+                ),
+                const SizedBox(height: 8),
+                // simple hint
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Text('Attach an image, document or your current location', style: Theme.of(context).textTheme.bodySmall),
                 ),
               ],
             ),
@@ -556,6 +540,109 @@ class _ChatRoomViewState extends State<ChatRoomView> {
         );
       },
     );
+  }
+
+  Future<void> _pickImageFromGallery() async {
+    try {
+      final picker = ImagePicker();
+      final xfile = await picker.pickImage(source: ImageSource.gallery, imageQuality: 80, maxWidth: 1600);
+      if (xfile == null) return;
+      final file = File(xfile.path);
+      final fileName = p.basename(xfile.path);
+      final ext = p.extension(xfile.path).replaceFirst('.', '');
+      final mime = (xfile.mimeType != null && xfile.mimeType!.isNotEmpty) ? xfile.mimeType : _mimeFromExtension(ext);
+      await vm.sendImage(file, mimeType: mime, fileName: fileName);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Image queued for upload')));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to pick image: $e')));
+    }
+  }
+
+  Future<void> _pickDocument() async {
+    try {
+      final res = await FilePicker.platform.pickFiles(type: FileType.any);
+      if (res == null || res.files.isEmpty) return;
+      final path = res.files.single.path;
+      if (path == null) return;
+      final file = File(path);
+      final name = res.files.single.name;
+      final ext = res.files.single.extension;
+      final mime = _mimeFromExtension(ext);
+      await vm.sendDocument(file, mimeType: mime, fileName: name);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Document queued for upload')));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to pick document: $e')));
+    }
+  }
+
+  Future<void> _pickLocationAndSend() async {
+    try {
+      LocationPermission perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+        if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Location permission denied')));
+          return;
+        }
+      }
+
+      final pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      await vm.sendLocationMessage(pos.latitude, pos.longitude);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Location sent')));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to get/send location: $e')));
+    }
+  }
+
+  // Map some common extensions to MIME types
+  String? _mimeFromExtension(String? ext) {
+    if (ext == null) return null;
+    final e = ext.toLowerCase();
+    switch (e) {
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'png':
+        return 'image/png';
+      case 'gif':
+        return 'image/gif';
+      case 'webp':
+        return 'image/webp';
+      case 'mp4':
+      case 'm4v':
+        return 'video/mp4';
+      case 'mov':
+        return 'video/quicktime';
+      case 'mp3':
+        return 'audio/mpeg';
+      case 'wav':
+        return 'audio/wav';
+      case 'pdf':
+        return 'application/pdf';
+      case 'doc':
+        return 'application/msword';
+      case 'docx':
+        return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      case 'xls':
+        return 'application/vnd.ms-excel';
+      case 'xlsx':
+        return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      case 'ppt':
+        return 'application/vnd.ms-powerpoint';
+      case 'pptx':
+        return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+      case 'txt':
+        return 'text/plain';
+      case 'csv':
+        return 'text/csv';
+      case 'zip':
+        return 'application/zip';
+      default:
+        return null;
+    }
   }
 }
 
@@ -567,7 +654,15 @@ class _MessagesListView extends StatelessWidget {
   final void Function(ChatMessage msg) onSwipeReply;
   final ScrollController scrollController;
 
-  const _MessagesListView({super.key, required this.messages, required this.selectedIds, required this.onLongPressSelect, required this.onTapSelect, required this.onSwipeReply, required this.scrollController});
+  const _MessagesListView({
+    Key? key,
+    required this.messages,
+    required this.selectedIds,
+    required this.onLongPressSelect,
+    required this.onTapSelect,
+    required this.onSwipeReply,
+    required this.scrollController,
+  }) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
@@ -657,7 +752,6 @@ class _MessageTileMVState extends State<_MessageTileMV> with SingleTickerProvide
     final textColor = isMe ? Colors.white : const Color.fromARGB(255, 55, 116, 248);
     final time = _formatTimestamp(widget.message.createdAt);
 
-    // find replied message locally (UI only)
     ChatMessage? replied;
     if (widget.message.replyToMessageId != null) {
       try {
@@ -667,7 +761,18 @@ class _MessageTileMVState extends State<_MessageTileMV> with SingleTickerProvide
       }
     }
 
-    final contentText = widget.message.text; // no more 'Message deleted' placeholder. Deleted messages are removed earlier.
+    Widget contentWidget;
+    final type = widget.message.type;
+    if (type == 'image') {
+      contentWidget = _buildImagePreview(widget.message);
+    } else if (type == 'file') {
+      contentWidget = _buildFileTile(widget.message);
+    } else if (type == 'location') {
+      contentWidget = _buildLocationTile(widget.message);
+    } else {
+      // text or unknown
+      contentWidget = Text(widget.message.text ?? '', style: TextStyle(color: textColor, fontStyle: FontStyle.normal));
+    }
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -712,13 +817,13 @@ class _MessageTileMVState extends State<_MessageTileMV> with SingleTickerProvide
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: Text(
-                          replied.text,
+                          replied.text ?? (replied.type == 'image' ? '[Image]' : (replied.type == 'file' ? replied.fileName ?? '[File]' : '')),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(color: isMe ? Colors.white70 : Colors.black87, fontSize: 12),
                         ),
                       ),
-                    Text(contentText, style: TextStyle(color: textColor, fontStyle: FontStyle.normal)),
+                    contentWidget,
                     const SizedBox(height: 6),
                     Row(
                       mainAxisSize: MainAxisSize.min,
@@ -743,6 +848,118 @@ class _MessageTileMVState extends State<_MessageTileMV> with SingleTickerProvide
     );
   }
 
+  Widget _buildImagePreview(ChatMessage m) {
+    final hasLocal = m.localPath != null && m.localPath!.isNotEmpty;
+    final hasRemote = m.remoteUrl != null && m.remoteUrl!.isNotEmpty;
+
+    final imageWidget = hasLocal
+        ? Image.file(File(m.localPath!), fit: BoxFit.cover)
+        : (hasRemote
+            ? Image.network(m.remoteUrl!, fit: BoxFit.cover)
+            : Container(
+                height: 140,
+                color: Colors.grey.shade200,
+                child: const Center(child: Icon(Icons.broken_image)),
+              ));
+
+    return GestureDetector(
+      onTap: () {
+        // open fullscreen if possible
+        if (hasLocal || hasRemote) {
+          Navigator.push(context, MaterialPageRoute(builder: (_) => FullscreenImagePage(localPath: m.localPath, remoteUrl: m.remoteUrl)));
+        }
+      },
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 200, minHeight: 80),
+          child: AspectRatio(aspectRatio: 16 / 9, child: imageWidget),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFileTile(ChatMessage m) {
+    final displayName = m.fileName ?? m.remoteUrl?.split('/').last ?? 'File';
+    return GestureDetector(
+      onTap: () async {
+        // open remote url if present; otherwise attempt to open local file (best-effort)
+        if (m.remoteUrl != null && m.remoteUrl!.isNotEmpty) {
+          final uri = Uri.tryParse(m.remoteUrl!);
+          if (uri != null && await canLaunchUrl(uri)) {
+            await launchUrl(uri, mode: LaunchMode.externalApplication);
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cannot open file URL')));
+          }
+        } else if (m.localPath != null && m.localPath!.isNotEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('File is available locally (open with file manager)')));
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No file URL available')));
+        }
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.insert_drive_file, size: 32, color: Color(0xFF4F46E5)),
+            const SizedBox(width: 10),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 200),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(displayName, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 6),
+                  Text(m.mimeType ?? '', style: const TextStyle(fontSize: 12)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLocationTile(ChatMessage m) {
+    final lat = m.latitude;
+    final lng = m.longitude;
+    final label = m.text ?? (lat != null && lng != null ? 'Location: ${lat.toStringAsFixed(5)}, ${lng.toStringAsFixed(5)}' : 'Location');
+    return GestureDetector(
+      onTap: () async {
+        if (lat == null || lng == null) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No coordinates')));
+          return;
+        }
+        final googleMaps = Uri.parse('https://www.google.com/maps/search/?api=1&query=$lat,$lng');
+        if (await canLaunchUrl(googleMaps)) {
+          await launchUrl(googleMaps, mode: LaunchMode.externalApplication);
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cannot open maps')));
+        }
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(8)),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.location_on, color: Color(0xFF4F46E5)),
+            const SizedBox(width: 8),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 220),
+              child: Text(label, maxLines: 2, overflow: TextOverflow.ellipsis),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   static String _formatTimestamp(Timestamp ts) {
     final dt = ts.toDate();
     final now = DateTime.now();
@@ -752,6 +969,30 @@ class _MessageTileMVState extends State<_MessageTileMV> with SingleTickerProvide
       return '$hh:$mm';
     }
     return '${dt.day}/${dt.month}/${dt.year}';
+  }
+}
+
+class FullscreenImagePage extends StatelessWidget {
+  final String? localPath;
+  final String? remoteUrl;
+  const FullscreenImagePage({super.key, this.localPath, this.remoteUrl});
+
+  @override
+  Widget build(BuildContext context) {
+    Widget img;
+    if (localPath != null && localPath!.isNotEmpty) {
+      img = Image.file(File(localPath!), fit: BoxFit.contain);
+    } else if (remoteUrl != null && remoteUrl!.isNotEmpty) {
+      img = Image.network(remoteUrl!, fit: BoxFit.contain);
+    } else {
+      img = const Center(child: Icon(Icons.broken_image, size: 64));
+    }
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(backgroundColor: Colors.black, elevation: 0),
+      body: Center(child: InteractiveViewer(child: img)),
+    );
   }
 }
 
@@ -777,7 +1018,7 @@ class ReplyPreviewWidget extends StatelessWidget {
               children: [
                 Text(label, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
                 const SizedBox(height: 6),
-                Text(message.text, maxLines: 1, overflow: TextOverflow.ellipsis),
+                Text(message.text ?? (message.type == 'image' ? '[Image]' : (message.type == 'file' ? message.fileName ?? '[File]' : '')), maxLines: 1, overflow: TextOverflow.ellipsis),
               ],
             ),
           ),
@@ -792,7 +1033,7 @@ class _AttachmentTile extends StatelessWidget {
   final IconData icon;
   final String label;
   final VoidCallback onTap;
-  const _AttachmentTile({super.key, required this.icon, required this.label, required this.onTap});
+  const _AttachmentTile({Key? key, required this.icon, required this.label, required this.onTap}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {

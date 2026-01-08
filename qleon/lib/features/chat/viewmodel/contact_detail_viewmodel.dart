@@ -102,7 +102,7 @@ class ContactDetailViewModel extends ChangeNotifier {
         notifyListeners();
         return;
       }
-      final data = snap.data() as Map<String, dynamic>?;
+      final data = snap.data();
       contactData = data ?? {};
       // keep convenience fields in sync
       contactName = (data?['name'] as String?) ?? (data?['displayName'] as String?);
@@ -117,7 +117,7 @@ class ContactDetailViewModel extends ChangeNotifier {
     _conversationSub?.cancel();
     _conversationSub = _firestore.collection('conversations').doc(convId).snapshots().listen((snap) {
       if (!snap.exists) return;
-      final data = snap.data() as Map<String, dynamic>?;
+      final data = snap.data();
       // if members changed and we don't have contactUid, attempt to resolve
       if (data != null && contactUid == null && currentUid != null) {
         final members = (data['members'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [];

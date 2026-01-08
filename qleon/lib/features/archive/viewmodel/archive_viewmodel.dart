@@ -161,7 +161,6 @@ class ArchiveViewModel extends ChangeNotifier {
   // Pagination (not used for Hive but kept for API compatibility)
   static const int defaultPageSize = 30;
   int pageSize = defaultPageSize;
-  DocumentSnapshot<Map<String, dynamic>>? _lastDoc;
   bool hasMore = true;
   bool isPaginating = false;
 

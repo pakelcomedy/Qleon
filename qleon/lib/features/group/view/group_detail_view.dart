@@ -8,7 +8,6 @@ class GroupDetailView extends StatefulWidget {
 }
 
 class _GroupDetailViewState extends State<GroupDetailView> {
-  List<DummyContact> _selectedMembers = [];
 
   @override
   Widget build(BuildContext context) {
@@ -54,7 +53,6 @@ class _GroupDetailViewState extends State<GroupDetailView> {
           MaterialPageRoute(builder: (_) => const AddMembersPage()),
         );
         if (result != null) {
-          setState(() => _selectedMembers = result);
         }
       },
       child: Container(

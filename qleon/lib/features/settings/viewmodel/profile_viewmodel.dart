@@ -45,7 +45,7 @@ class ProfileViewModel extends ChangeNotifier {
     try {
       _sub = userRef.snapshots().listen((snap) {
         if (snap.exists) {
-          final data = snap.data() as Map<String, dynamic>?;
+          final data = snap.data();
 
           // update fields safely
           name = data?['name'] as String?;

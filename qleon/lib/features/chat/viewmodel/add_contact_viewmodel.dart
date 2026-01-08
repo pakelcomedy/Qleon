@@ -57,7 +57,7 @@ class AddContactViewModel extends ChangeNotifier {
       }
 
       final name = payload.substring(0, kNameLen);
-      final temp = payload.substring(kNameLen, kNameLen + kTempLen);
+      payload.substring(kNameLen, kNameLen + kTempLen);
       final uid = payload.substring(kNameLen + kTempLen);
 
       // sanity checks
