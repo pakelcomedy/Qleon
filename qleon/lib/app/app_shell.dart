@@ -2,8 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'dart:async'; // for unawaited
+// added imports
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../features/chat/view/chat_list_view.dart';
 import '../features/call/view/call_history_view.dart';
+
+// import LocalChatDb + ChatMessage from your viewmodel file
+// adjust path if your actual file is at a different path
+import '../features/chat/viewmodel/chat_room_viewmodel.dart';
 
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
@@ -12,8 +20,7 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
-class _AppShellState extends State<AppShell>
-    with WidgetsBindingObserver {
+class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   int _currentIndex = 0;
   DateTime? _lastBackPressed;
 
@@ -34,7 +41,20 @@ class _AppShellState extends State<AppShell>
 
     /// cek sekali saat app pertama dibuka
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _checkOfflineAndShowIfNeeded();
+      // ensure local DB initialized before doing ack work
+      Future.microtask(() async {
+        try {
+          await LocalChatDb.init();
+        } catch (e) {
+          debugPrint('[AppShell] Local DB init failed: $e');
+        }
+
+        await _checkOfflineAndShowIfNeeded();
+
+        // also best-effort: when app first opens, try to ACK undelivered local messages
+        // do not await so UI won't block
+        unawaited(_ackUndeliveredLocalMessages());
+      });
     });
   }
 
@@ -53,6 +73,22 @@ class _AppShellState extends State<AppShell>
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
       _saveLastOnline();
+    }
+
+    // WHEN APP RETURNS TO FOREGROUND -> trigger delivered ACK process
+    if (state == AppLifecycleState.resumed) {
+      // check offline dialog
+      _checkOfflineAndShowIfNeeded();
+
+      // ensure local DB ready and then try to ack undelivered messages (best-effort)
+      Future.microtask(() async {
+        try {
+          await LocalChatDb.init();
+        } catch (e) {
+          debugPrint('[AppShell] Local DB init failed on resume: $e');
+        }
+        unawaited(_ackUndeliveredLocalMessages());
+      });
     }
   }
 
@@ -74,8 +110,7 @@ class _AppShellState extends State<AppShell>
       final now = DateTime.now();
 
       if (lastMillis != null) {
-        final lastOnline =
-            DateTime.fromMillisecondsSinceEpoch(lastMillis);
+        final lastOnline = DateTime.fromMillisecondsSinceEpoch(lastMillis);
         final diff = now.difference(lastOnline);
 
         /// 🔔 MUNCUL JIKA SUDAH ATAU DI ATAS 3 HARI
@@ -122,6 +157,89 @@ class _AppShellState extends State<AppShell>
         );
       },
     );
+  }
+
+  // =============================================================
+  // DELIVERED: ACK undelivered local messages when app resumes / first open
+  // =============================================================
+  /// Best-effort: cari pesan lokal yang belum delivered (delivered == 0) dan
+  /// sender != currentUser -> kirim update ke Firestore untuk set delivered:true.
+  /// Update juga local DB (markDelivered).
+  ///
+  /// Safety notes:
+  /// - Batasi jumlah updates per run (avoid giant writes on startup).
+  /// - Catch errors: do not crash app.
+  Future<void> _ackUndeliveredLocalMessages() async {
+    try {
+      // ensure local DB is initialized
+      await LocalChatDb.init();
+
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        debugPrint('[AppShell] _ackUndeliveredLocalMessages: user null -> skip');
+        return;
+      }
+      final currentUid = user.uid;
+
+      final db = LocalChatDb.db;
+
+      // limit number rows to process per run (safety)
+      const int limitPerRun = 100;
+
+      final rows = await db.query(
+        'messages',
+        where: 'delivered = 0 AND senderId != ?',
+        whereArgs: [currentUid],
+        orderBy: 'createdAt ASC',
+        limit: limitPerRun,
+      );
+
+      if (rows.isEmpty) {
+        debugPrint('[AppShell] no undelivered local messages found');
+        return;
+      }
+
+      debugPrint('[AppShell] found ${rows.length} undelivered local messages -> acking (limit $limitPerRun)');
+
+      final firestore = FirebaseFirestore.instance;
+
+      for (final row in rows) {
+        try {
+          final msg = ChatMessage.fromLocal(row);
+
+          // Build doc ref and set delivered (idempotent)
+          final docRef = firestore
+              .collection('conversations')
+              .doc(msg.conversationId)
+              .collection('messages')
+              .doc(msg.id);
+
+          // 1) mark delivered (merge) - idempotent
+          await docRef.set({
+            'delivered': true,
+            'deliveredAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+
+          // 2) attempt to delete server copy (best-effort). According to local-first design,
+          // the server copy should only be removed once we have the message locally — which we do.
+          try {
+            await docRef.delete();
+          } catch (e) {
+            debugPrint('[AppShell] delete after ack failed for ${msg.id}: $e');
+          }
+
+          // 3) update local DB (mark delivered)
+          await LocalChatDb.markDelivered(msg.conversationId, msg.id, deliveredAt: Timestamp.now());
+
+          debugPrint('[AppShell] acked delivered for ${msg.id} in conv ${msg.conversationId}');
+        } catch (e) {
+          debugPrint('[AppShell] failed acking one message: $e');
+          // continue with next
+        }
+      }
+    } catch (e) {
+      debugPrint('[AppShell] _ackUndeliveredLocalMessages error: $e');
+    }
   }
 
   // =============================================================

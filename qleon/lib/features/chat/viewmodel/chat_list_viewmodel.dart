@@ -147,6 +147,7 @@ class ChatSummary {
 
 /// Production-ready ViewModel for ChatList with robust dedupe logic.
 /// This variant treats archive as LOCAL (Hive). It ignores server-side `archived` flags.
+/// Modified for "local-first" behaviour: UI reads from local Hive cache immediately.
 class ChatListViewModel extends ChangeNotifier {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -180,8 +181,9 @@ class ChatListViewModel extends ChangeNotifier {
   // For dedupe: cache publicId -> uid resolution
   final Map<String, String> _publicToUidCache = {};
 
-  // Hive box for archived chats
-  Box? _archiveBox;
+  // Hive boxes for archived and cached chats (local-first source of truth)
+  Box? _archiveBox; // archived_chats
+  Box? _chatsBox; // chats_cache
 
   ChatListViewModel() {
     _init();
@@ -231,7 +233,7 @@ class ChatListViewModel extends ChangeNotifier {
     errorMessage = null;
     notifyListeners();
 
-    // Initialize Hive box for archived chats (best-effort)
+    // Initialize Hive boxes for archived chats and cached chats (local-first)
     try {
       if (!Hive.isBoxOpen('archived_chats')) {
         await Hive.openBox('archived_chats');
@@ -240,6 +242,16 @@ class ChatListViewModel extends ChangeNotifier {
     } catch (e) {
       debugPrint('[ChatListVM] failed to open Hive box archived_chats: $e');
       _archiveBox = null;
+    }
+
+    try {
+      if (!Hive.isBoxOpen('chats_cache')) {
+        await Hive.openBox('chats_cache');
+      }
+      _chatsBox = Hive.box('chats_cache');
+    } catch (e) {
+      debugPrint('[ChatListVM] failed to open Hive box chats_cache: $e');
+      _chatsBox = null;
     }
 
     try {
@@ -255,7 +267,10 @@ class ChatListViewModel extends ChangeNotifier {
       _lastDoc = null;
       hasMore = true;
 
-      // per-user chat summaries listener (primary persisted source)
+      // Load local cached chats first (local-first UI)
+      await _loadLocalCachedChats();
+
+      // per-user chat summaries listener (primary server source of deltas)
       Query<Map<String, dynamic>> baseQuery = _firestore
           .collection('users')
           .doc(uid)
@@ -269,6 +284,8 @@ class ChatListViewModel extends ChangeNotifier {
       _sub = baseQuery.snapshots().listen((snap) async {
         _lastDoc = snap.docs.isNotEmpty ? snap.docs.last : null;
         hasMore = snap.docs.length >= pageSize;
+
+        // Apply server changes by first persisting into local cache (Hive), then merging into memory
         var changed = false;
 
         for (final change in snap.docChanges) {
@@ -278,6 +295,13 @@ class ChatListViewModel extends ChangeNotifier {
 
           if (change.type == DocumentChangeType.added || change.type == DocumentChangeType.modified) {
             final summary = ChatSummary.fromMap(id, data);
+
+            // Persist to local cache FIRST (local-first)
+            try {
+              if (_chatsBox != null) await _chatsBox!.put(id, summary.toMapForHive());
+            } catch (e) {
+              debugPrint('[ChatListVM] failed to persist chat summary to local cache for $id: $e');
+            }
 
             // STRONG DEDUPE: if 1:1 and existing by other, merge into existing
             if (!summary.isGroup && summary.otherPublicId.isNotEmpty) {
@@ -292,7 +316,7 @@ class ChatListViewModel extends ChangeNotifier {
                 );
                 final put = _putIfAllowed(merged);
                 if (put) changed = true;
-                // best-effort remove duplicate doc
+                // best-effort remove duplicate doc on server
                 try {
                   await _firestore.collection('users').doc(uid).collection('chats').doc(id).delete();
                 } catch (_) {}
@@ -306,9 +330,16 @@ class ChatListViewModel extends ChangeNotifier {
               if (put) changed = true;
             }
           } else if (change.type == DocumentChangeType.removed) {
+            // removed from server. We still consult local archive/cache to decide final state.
             if (_chatMap.containsKey(id)) {
               _chatMap.remove(id);
               changed = true;
+            }
+            // also remove from local cache to keep parity
+            try {
+              if (_chatsBox != null && _chatsBox!.isOpen) await _chatsBox!.delete(id);
+            } catch (e) {
+              debugPrint('[ChatListVM] failed to delete from local cache $id: $e');
             }
           }
         }
@@ -350,6 +381,26 @@ class ChatListViewModel extends ChangeNotifier {
       isLoading = false;
       errorMessage = e.toString();
       notifyListeners();
+    }
+  }
+
+  Future<void> _loadLocalCachedChats() async {
+    try {
+      if (_chatsBox != null && _chatsBox!.isOpen) {
+        for (final key in _chatsBox!.keys) {
+          final v = _chatsBox!.get(key);
+          if (v is Map) {
+            final s = ChatSummary.fromHiveMap(key.toString(), v);
+            // only add if not archived locally
+            if (!_isStoredInArchive(s.id)) {
+              _chatMap[s.id] = s;
+            }
+          }
+        }
+        _rebuildSortedListAndNotify();
+      }
+    } catch (e) {
+      debugPrint('[ChatListVM] failed to load local cached chats: $e');
     }
   }
 
@@ -420,6 +471,12 @@ class ChatListViewModel extends ChangeNotifier {
       for (final doc in nextSnap.docs) {
         final id = doc.id;
         final summary = ChatSummary.fromMap(id, doc.data());
+        // Persist locally first
+        try {
+          if (_chatsBox != null) await _chatsBox!.put(id, summary.toMapForHive());
+        } catch (e) {
+          debugPrint('[ChatListVM] failed to persist chat summary to local cache for $id during loadMore: $e');
+        }
         _putIfAllowed(summary);
       }
       _lastDoc = nextSnap.docs.isNotEmpty ? nextSnap.docs.last : _lastDoc;
@@ -464,6 +521,7 @@ class ChatListViewModel extends ChangeNotifier {
   }
 
   /// MAIN MERGE / DEDUP LOGIC
+  /// Persist summary into local cache first, then merge and optionally persist back to server.
   Future<void> _mergeAndPersistSummaryFromConv(
       String convId, Map<String, dynamic>? convData, QueryDocumentSnapshot<Map<String, dynamic>>? mdoc) async {
     final uid = currentUid;
@@ -528,6 +586,13 @@ class ChatListViewModel extends ChangeNotifier {
         otherPublicId: otherPublicId,
       );
 
+      // Persist to local cache first (local-first principle)
+      try {
+        if (_chatsBox != null) await _chatsBox!.put(convId, summary.toMapForHive());
+      } catch (e) {
+        debugPrint('[ChatListVM] failed to persist conv summary to local cache for $convId: $e');
+      }
+
       // STRONG DEDUPE: if another existing chat represents the same other user, merge into it
       if (!isGroup && otherId.isNotEmpty) {
         final existingByOther = await _findExistingByOtherIdAsync(otherId);
@@ -547,14 +612,14 @@ class ChatListViewModel extends ChangeNotifier {
           final put = _putIfAllowed(merged);
           if (put) _rebuildSortedListAndNotify();
 
-          // persist merged to users/{uid}/chats/{existingId}
+          // persist merged to users/{uid}/chats/{existingId} (best-effort) AFTER local cache persisted
           try {
             await _firestore.collection('users').doc(uid).collection('chats').doc(existingId).set(merged.toMapForFirestore(), SetOptions(merge: true));
           } catch (e) {
             debugPrint('[ChatListVM] failed to persist merged users chat $existingId: $e');
           }
 
-          // Best-effort delete duplicate per-user doc
+          // Best-effort delete duplicate per-user doc on server
           try {
             await userChatRef.delete();
           } catch (_) {}
@@ -567,7 +632,7 @@ class ChatListViewModel extends ChangeNotifier {
       final put = _putIfAllowed(summary);
       if (put) _rebuildSortedListAndNotify();
 
-      // persist summary for this user (merge)
+      // persist summary for this user (merge) - best-effort
       try {
         await userChatRef.set(summary.toMapForFirestore(), SetOptions(merge: true));
       } catch (e) {
@@ -750,11 +815,11 @@ class ChatListViewModel extends ChangeNotifier {
         final existing = _chatMap[id];
         if (existing != null) {
           try {
+            // Persist to archive box FIRST (local-first), then remove from active map
             if (_archiveBox != null) await _archiveBox!.put(id, existing.toMapForHive());
           } catch (e) {
             debugPrint('[ChatListVM] failed to write to archive box for $id: $e');
           }
-          // remove active map entry
           _chatMap.remove(id);
         } else {
           // if not present in cache, try to fetch users/{uid}/chats/{id} and move it
@@ -769,7 +834,7 @@ class ChatListViewModel extends ChangeNotifier {
           }
         }
 
-        // remove server doc to avoid reappearing
+        // remove server doc to avoid reappearing (best-effort)
         try {
           await _firestore.collection('users').doc(uid).collection('chats').doc(id).delete();
         } catch (e) {
@@ -825,6 +890,10 @@ class ChatListViewModel extends ChangeNotifier {
         try {
           if (_archiveBox != null) await _archiveBox!.delete(id);
         } catch (_) {}
+        // also remove from local cache
+        try {
+          if (_chatsBox != null) await _chatsBox!.delete(id);
+        } catch (_) {}
       }
       await batch.commit();
 
@@ -855,6 +924,12 @@ class ChatListViewModel extends ChangeNotifier {
         final updated = _cachedChats[idx].copyWith(unreadCount: 0);
         _putIfAllowed(updated);
         _rebuildSortedListAndNotify();
+        // update local cache too
+        try {
+          if (_chatsBox != null) await _chatsBox!.put(chatId, updated.toMapForHive());
+        } catch (e) {
+          debugPrint('[ChatListVM] failed to update local cache for markAsRead $chatId: $e');
+        }
       }
     } catch (e) {
       errorMessage = e.toString();
@@ -884,6 +959,13 @@ class ChatListViewModel extends ChangeNotifier {
       }
       debugPrint('[ChatListVM] mergeIncomingChatSummary skipped ${summary.id} because it exists in local archive');
       return;
+    }
+
+    // Persist incoming summary to local cache first
+    try {
+      if (_chatsBox != null) _chatsBox!.put(summary.id, summary.toMapForHive());
+    } catch (e) {
+      debugPrint('[ChatListVM] failed to persist incoming chat summary locally for ${summary.id}: $e');
     }
 
     final existing = _chatMap[summary.id];

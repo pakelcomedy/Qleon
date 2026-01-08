@@ -2,7 +2,7 @@
 // Offline-first ChatRoomViewModel (local-first like WhatsApp) with:
 // - SQLite local source-of-truth
 // - Firestore as temporary queue + TTL (3 days)
-// - optimistic send, pending queue, retries, ACK handling
+// - optimistic send, pending queue, retries, ACK+DELETE handling (server copy removed once persisted locally)
 // Dependencies:
 //   sqflite: ^2.2.8
 //   path_provider: ^2.0.14
@@ -249,6 +249,19 @@ class LocalChatDb {
     return rows.map((r) => ChatMessage.fromLocal(r)).toList();
   }
 
+  // ADDED: helper to get undelivered messages (for ACK process)
+  static Future<List<ChatMessage>> getUndeliveredMessages(String conversationId, String excludeSenderId, {int limit = 100}) async {
+    // delivered = 0 AND senderId != excludeSenderId
+    final rows = await db.query(
+      'messages',
+      where: 'conversationId = ? AND delivered = 0 AND senderId != ?',
+      whereArgs: [conversationId, excludeSenderId],
+      orderBy: 'createdAt ASC',
+      limit: limit,
+    );
+    return rows.map((r) => ChatMessage.fromLocal(r)).toList();
+  }
+
   static Future<void> updateSendState(String conversationId, String messageId, String sendState, {int? sendAttempts}) async {
     final map = <String, Object?>{'sendState': sendState};
     if (sendAttempts != null) map['sendAttempts'] = sendAttempts;
@@ -371,7 +384,7 @@ class ChatRoomViewModel extends ChangeNotifier {
       // Start listeners: canonical + legacy (if original differs)
       await _startListeners(canonicalId: conversationId, legacyId: (originalConversationId == conversationId) ? null : originalConversationId);
 
-      // Load local messages to show immediately
+      // Load local messages to show immediately (UI must read only from local DB)
       await _loadLocalMessages();
 
       // cleanup expired local messages for this conversation (best-effort)
@@ -398,7 +411,10 @@ class ChatRoomViewModel extends ChangeNotifier {
   Future<void> _loadLocalMessages() async {
     try {
       final local = await LocalChatDb.getMessagesForConversation(conversationId);
-      // merge into map and rebuild
+      // reset in-memory map and rebuild from local DB (local is source-of-truth for UI)
+      _messagesMap.clear();
+      _fingerprintIndex.clear();
+      _idToFingerprint.clear();
       for (final m in local) {
         _messagesMap[m.id] = m;
         final fp = _makeFingerprint(m);
@@ -419,8 +435,8 @@ class ChatRoomViewModel extends ChangeNotifier {
 
     // canonical listener
     final collRef = _firestore.collection('conversations').doc(canonicalId).collection('messages');
-    _sub = collRef.orderBy('createdAt', descending: false).snapshots().listen((snap) {
-      _applySnapshotToMap(snap, convId: canonicalId, isLegacy: false);
+    _sub = collRef.orderBy('createdAt', descending: false).snapshots().listen((snap) async {
+      await _applySnapshotToMap(snap, convId: canonicalId, isLegacy: false);
     }, onError: (e, st) {
       errorMessage = e.toString();
       notifyListeners();
@@ -430,8 +446,8 @@ class ChatRoomViewModel extends ChangeNotifier {
     // legacy listener only if provided & different
     if (legacyId != null && legacyId.isNotEmpty && legacyId != canonicalId) {
       final legacyRef = _firestore.collection('conversations').doc(legacyId).collection('messages');
-      _legacySub = legacyRef.orderBy('createdAt', descending: false).snapshots().listen((snap) {
-        _applySnapshotToMap(snap, convId: legacyId, isLegacy: true);
+      _legacySub = legacyRef.orderBy('createdAt', descending: false).snapshots().listen((snap) async {
+        await _applySnapshotToMap(snap, convId: legacyId, isLegacy: true);
       }, onError: (e, st) {
         debugPrint('[ChatVM] legacy listener error for $legacyId: $e');
       });
@@ -442,15 +458,14 @@ class ChatRoomViewModel extends ChangeNotifier {
   }
 
   /// Apply snapshot into local in-memory map, persist novel messages to local DB,
-  /// and send ACK for messages received by this device.
-  void _applySnapshotToMap(QuerySnapshot snap, {required String convId, required bool isLegacy}) {
+  /// and ACK+DELETE messages on server after local persistence.
+  Future<void> _applySnapshotToMap(QuerySnapshot snap, {required String convId, required bool isLegacy}) async {
     var changed = false;
     var novelFound = false;
 
     final currentUid = FirebaseAuth.instance.currentUser?.uid;
 
     for (final doc in snap.docs) {
-      // safe parsing: wrap in try/catch per doc
       ChatMessage cm;
       try {
         cm = ChatMessage.fromDoc(doc, conversationIdOverride: convId);
@@ -461,70 +476,39 @@ class ChatRoomViewModel extends ChangeNotifier {
 
       final fp = _makeFingerprint(cm);
 
-      // If we already have a message with same doc id -> update it
-      if (_messagesMap.containsKey(cm.id)) {
-        final prev = _messagesMap[cm.id]!;
-        final prevFp = _idToFingerprint[cm.id];
-        if (prev.createdAt.millisecondsSinceEpoch != cm.createdAt.millisecondsSinceEpoch ||
-            prev.text != cm.text ||
-            prev.isDeleted != cm.isDeleted ||
-            prev.delivered != cm.delivered) {
-          _messagesMap[cm.id] = cm;
-          changed = true;
-        }
-        if (prevFp != fp) {
-          if (prevFp != null) _fingerprintIndex.remove(prevFp);
-          _fingerprintIndex[fp] = cm.id;
-          _idToFingerprint[cm.id] = fp;
-        }
-        // persist latest into local DB (upsert) - this will replace optimistic entry if id matches
-        _persistToLocal(cm);
-        // maybe ACK if needed
-        _maybeAcknowledgeIfNeeded(cm, convId: convId, currentUid: currentUid);
-        continue;
-      }
-
-      // If fingerprint already mapped => treat as duplicate message (different doc id)
+      // Dedup: if fingerprint exists and points to same content, skip heavy work.
       if (_fingerprintIndex.containsKey(fp)) {
         final existingId = _fingerprintIndex[fp]!;
         final existing = _messagesMap[existingId];
-        if (existing == null) {
-          // stale mapping: replace mapping with this doc
-          _messagesMap[cm.id] = cm;
-          _fingerprintIndex[fp] = cm.id;
-          _idToFingerprint[cm.id] = fp;
-          changed = true;
-          novelFound = true;
-          _persistToLocal(cm);
-          _maybeAcknowledgeIfNeeded(cm, convId: convId, currentUid: currentUid);
-          continue;
+        if (existing != null) {
+          // heuristics: if server copy isn't newer or different, skip
+          final shouldReplace = cm.createdAt.millisecondsSinceEpoch > existing.createdAt.millisecondsSinceEpoch || cm.text != existing.text || cm.isDeleted != existing.isDeleted;
+          if (!shouldReplace) {
+            // still attempt to ACK+DELETE if needed (in case server still holds a copy)
+            await _ackAndDeleteIfNeeded(cm, convId: convId, currentUid: currentUid);
+            continue;
+          }
         }
+      }
 
-        // Decide whether to replace existing entry content (prefer newer createdAt)
-        final shouldReplace =
-            cm.createdAt.millisecondsSinceEpoch > existing.createdAt.millisecondsSinceEpoch ||
-                cm.text != existing.text ||
-                cm.isDeleted != existing.isDeleted;
-        if (shouldReplace) {
-          _messagesMap[existingId] = cm;
-          _idToFingerprint[existingId] = fp;
-          changed = true;
-        }
-        // Persist latest to local DB and ACK if needed
-        _persistToLocal(cm);
-        _maybeAcknowledgeIfNeeded(cm, convId: convId, currentUid: currentUid);
+      // Persist server message into local DB FIRST (critical: local-first)
+      try {
+        await _persistToLocal(cm);
+        novelFound = true;
+      } catch (e) {
+        debugPrint('[ChatVM] failed to persist server msg ${cm.id} locally: $e');
+        // do not ACK or DELETE if local persist failed
         continue;
       }
 
-      // New message (fingerprint + docId)
-      _messagesMap[cm.id] = cm;
+      // After local persistence succeeded, attempt ACK and DELETE on server
+      await _ackAndDeleteIfNeeded(cm, convId: convId, currentUid: currentUid);
+
+      // update fingerprint/index to avoid reprocessing
       _fingerprintIndex[fp] = cm.id;
       _idToFingerprint[cm.id] = fp;
+      _messagesMap[cm.id] = cm; // keep a transient mapping (final state will come from local DB load)
       changed = true;
-      novelFound = true;
-
-      _persistToLocal(cm);
-      _maybeAcknowledgeIfNeeded(cm, convId: convId, currentUid: currentUid);
     }
 
     // Heuristic: if legacy only produces duplicates repeatedly, cancel it
@@ -542,8 +526,9 @@ class ChatRoomViewModel extends ChangeNotifier {
       }
     }
 
-    if (changed) {
-      _rebuildMessagesFromMap();
+    // Important: UI should read from local DB (source-of-truth). Reload local messages if something novel changed.
+    if (changed || novelFound) {
+      await _loadLocalMessages();
       isLoading = false;
       notifyListeners();
     } else {
@@ -554,52 +539,118 @@ class ChatRoomViewModel extends ChangeNotifier {
     }
   }
 
-  /// Persist message to local DB (upsert). Runs best-effort (non-blocking for UI).
-  void _persistToLocal(ChatMessage m) {
-    LocalChatDb.upsertMessage(m).catchError((e) {
+  /// Persist message to local DB (upsert). Runs best-effort but awaited by caller.
+  Future<void> _persistToLocal(ChatMessage m) async {
+    try {
+      await LocalChatDb.upsertMessage(m);
+    } catch (e) {
       debugPrint('[ChatVM] local persist failed for ${m.id}: $e');
-    });
+      rethrow;
+    }
   }
 
-  /// Acknowledge message: if we are the recipient and message not yet delivered, set delivered true.
-  void _maybeAcknowledgeIfNeeded(ChatMessage m, {required String convId, String? currentUid}) {
+  /// Acknowledge + delete message on server side after local persistence.
+  /// Sequence: set delivered=true (idempotent merge) then delete the message doc from Firestore.
+  Future<void> _ackAndDeleteIfNeeded(ChatMessage m, {required String convId, String? currentUid}) async {
     try {
       currentUid ??= FirebaseAuth.instance.currentUser?.uid;
       if (currentUid == null) return;
       // don't ACK our own messages
       if (m.senderId == currentUid) return;
       if (m.isDeleted) return;
-      if (m.delivered) return; // already delivered according to server
 
-      // avoid duplicate ACK attempts for same doc
       final ackKey = '$convId::${m.id}';
       if (_ackInProgress.contains(ackKey)) return;
-
       _ackInProgress.add(ackKey);
 
-      // mark delivered on server (idempotent update)
-      _firestore
-          .collection('conversations')
-          .doc(convId)
-          .collection('messages')
-          .doc(m.id)
-          .set({
+      final docRef = _firestore.collection('conversations').doc(convId).collection('messages').doc(m.id);
+
+      try {
+        // 1) mark delivered state (idempotent)
+        await docRef.set({
+          'delivered': true,
+          'deliveredAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+
+        // 2) delete the server copy (transient queue)
+        await docRef.delete();
+
+        // 3) mark local DB as delivered
+        await LocalChatDb.markDelivered(convId, m.id, deliveredAt: Timestamp.now());
+        debugPrint('[ChatVM] ACK+DELETE success for ${m.id}');
+      } catch (e) {
+        // If delete fails but set succeeded, that's acceptable — we'll try again later.
+        debugPrint('[ChatVM] ACK+DELETE failed for ${m.id}: $e');
+      } finally {
+        _ackInProgress.remove(ackKey);
+      }
+    } catch (e) {
+      debugPrint('[ChatVM] _ackAndDeleteIfNeeded error: $e');
+    }
+  }
+
+  /// ADDED: Public helper to ack undelivered local messages for this conversation.
+  /// Returns number of messages acked (best-effort).
+  Future<int> ackUndeliveredLocalMessages({int limit = 100}) async {
+    try {
+      await LocalChatDb.init();
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        debugPrint('[ChatVM] ackUndeliveredLocalMessages: no auth -> skip');
+        return 0;
+      }
+      final currentUid = user.uid;
+
+      final pending = await LocalChatDb.getUndeliveredMessages(conversationId, currentUid, limit: limit);
+      if (pending.isEmpty) return 0;
+
+      final firestore = FirebaseFirestore.instance;
+      var acked = 0;
+
+      for (final m in pending) {
+        final ackKey = '$conversationId::${m.id}';
+        if (_ackInProgress.contains(ackKey)) continue; // skip if ack already in progress
+
+        _ackInProgress.add(ackKey);
+        try {
+          final docRef = firestore
+              .collection('conversations')
+              .doc(conversationId)
+              .collection('messages')
+              .doc(m.id);
+
+          // idempotent merge set
+          await docRef.set({
             'delivered': true,
             'deliveredAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true))
-          .then((_) async {
-            // reflect delivered flag in local DB
-            final nowTs = Timestamp.now();
-            await LocalChatDb.markDelivered(convId, m.id, deliveredAt: nowTs);
-          })
-          .catchError((e) {
-            debugPrint('[ChatVM] ACK failed for ${m.id}: $e');
-          })
-          .whenComplete(() {
-            _ackInProgress.remove(ackKey);
-          });
+          }, SetOptions(merge: true));
+
+          // attempt delete of server copy (best-effort)
+          try {
+            await docRef.delete();
+          } catch (e) {
+            debugPrint('[ChatVM] delete after ack failed for ${m.id}: $e');
+          }
+
+          // mark local DB
+          await LocalChatDb.markDelivered(conversationId, m.id, deliveredAt: Timestamp.now());
+          acked++;
+          debugPrint('[ChatVM] acked delivered for local msg ${m.id}');
+        } catch (e) {
+          debugPrint('[ChatVM] ackUndeliveredLocalMessages failed for ${m.id}: $e');
+          // continue with next
+        } finally {
+          _ackInProgress.remove(ackKey);
+        }
+      }
+
+      // reload local state
+      await _loadLocalMessages();
+      notifyListeners();
+      return acked;
     } catch (e) {
-      debugPrint('[ChatVM] _maybeAcknowledgeIfNeeded error: $e');
+      debugPrint('[ChatVM] ackUndeliveredLocalMessages error: $e');
+      return 0;
     }
   }
 
@@ -757,9 +808,10 @@ class ChatRoomViewModel extends ChangeNotifier {
       // attempt immediate upload (idempotent set)
       final msgRef = convRef.collection('messages').doc(localMsg.id);
       await msgRef.set(localMsg.toMapForSend(ttl: messageTTL));
-      // note: snapshot will replace the local placeholder with server copy (same id)
-      // update local sendState to 'sending' (best-effort) - actual 'sent' will be via snapshot/server-existence
-      await LocalChatDb.updateSendState(conversationId, localMsg.id, 'sending', sendAttempts: 1);
+
+      // IMPORTANT: since Firestore is a transient queue and receiver may ACK+DELETE quickly,
+      // treat a successful set() as "sent" for sender local state.
+      await LocalChatDb.updateSendState(conversationId, localMsg.id, 'sent', sendAttempts: 1);
     } catch (e, st) {
       // mark failed & increment attempts (do not remove local placeholder)
       final failedAttempts = localMsg.sendAttempts + 1;
@@ -793,9 +845,8 @@ class ChatRoomViewModel extends ChangeNotifier {
         final msgRef = convRef.collection('messages').doc(m.id);
         try {
           await msgRef.set(m.toMapForSend(ttl: messageTTL));
-          // best-effort: mark as 'sending' (server snapshot will mark 'sent')
-          // local DB will be updated by snapshot/upsert; still mark sendState to 'sending' here:
-          await LocalChatDb.updateSendState(conversationId, m.id, 'sending', sendAttempts: m.sendAttempts + 1);
+          // mark as 'sent' on success
+          await LocalChatDb.updateSendState(conversationId, m.id, 'sent', sendAttempts: m.sendAttempts + 1);
         } catch (e) {
           // mark failed, will be retried later
           final attempts = m.sendAttempts + 1;
@@ -829,7 +880,6 @@ class ChatRoomViewModel extends ChangeNotifier {
       // optimistic local update
       final local = _messagesMap[messageId];
       if (local != null) {
-        final updated = local.copyWith(isLocal: local.isLocal, sendState: local.sendState);
         final replaced = ChatMessage(
           id: local.id,
           conversationId: local.conversationId,
