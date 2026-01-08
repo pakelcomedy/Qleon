@@ -277,6 +277,16 @@ class LocalChatDb {
   static Future<void> deleteExpiredMessages(String conversationId, int beforeMillis) async {
     await db.delete('messages', where: 'conversationId = ? AND expiresAt IS NOT NULL AND expiresAt < ?', whereArgs: [conversationId, beforeMillis]);
   }
+
+    // Hard-delete a single message from local DB (local-only)
+  static Future<void> deleteMessage(String conversationId, String messageId) async {
+    await db.delete('messages', where: 'conversationId = ? AND id = ?', whereArgs: [conversationId, messageId]);
+  }
+
+  // Hard-delete all messages for a conversation from local DB (local-only)
+  static Future<void> clearConversation(String conversationId) async {
+    await db.delete('messages', where: 'conversationId = ?', whereArgs: [conversationId]);
+  }
 }
 
 /// -----------------------------
@@ -874,37 +884,117 @@ class ChatRoomViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> softDeleteMessage(String messageId) async {
-    try {
-      await _firestore.collection('conversations').doc(conversationId).collection('messages').doc(messageId).set({'isDeleted': true, 'lastUpdated': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-      // optimistic local update
-      final local = _messagesMap[messageId];
-      if (local != null) {
-        final replaced = ChatMessage(
-          id: local.id,
-          conversationId: local.conversationId,
-          text: local.text,
-          senderId: local.senderId,
-          createdAt: local.createdAt,
-          replyToMessageId: local.replyToMessageId,
-          isDeleted: true,
-          isLocal: local.isLocal,
-          delivered: local.delivered,
-          deliveredAt: local.deliveredAt,
-          expiresAt: local.expiresAt,
-          sendState: local.sendState,
-          sendAttempts: local.sendAttempts,
-        );
-        _messagesMap[messageId] = replaced;
-        LocalChatDb.upsertMessage(replaced).catchError((e) => debugPrint('[ChatVM] local soft-delete failed $e'));
-        _rebuildMessagesFromMap();
-      }
-    } catch (e) {
-      errorMessage = e.toString();
-      notifyListeners();
-      rethrow;
-    }
+  /// Local-only soft-delete (tombstone) BUT kept as method named `delete` as requested.
+/// This will mark the message as isDeleted=true in local DB and in-memory but WILL NOT touch server.
+Future<void> delete(String messageId) async {
+  try {
+    final local = _messagesMap[messageId];
+    if (local == null) return;
+
+    final deleted = local.copyWith();
+    // create a new ChatMessage instance with isDeleted = true
+    final tombstone = ChatMessage(
+      id: deleted.id,
+      conversationId: deleted.conversationId,
+      text: deleted.text,
+      senderId: deleted.senderId,
+      createdAt: deleted.createdAt,
+      replyToMessageId: deleted.replyToMessageId,
+      isDeleted: true,
+      isLocal: deleted.isLocal,
+      delivered: deleted.delivered,
+      deliveredAt: deleted.deliveredAt,
+      expiresAt: deleted.expiresAt,
+      sendState: deleted.sendState,
+      sendAttempts: deleted.sendAttempts,
+    );
+
+    // 1️⃣ update in-memory
+    _messagesMap[messageId] = tombstone;
+
+    // 2️⃣ persist to SQLite (source of truth)
+    await LocalChatDb.upsertMessage(tombstone);
+
+    // 3️⃣ clean selection if present
+    selectedMessageIds.remove(messageId);
+
+    // 4️⃣ rebuild UI from in-memory
+    _rebuildMessagesFromMap();
+    notifyListeners();
+  } catch (e, st) {
+    debugPrint('[ChatVM] delete (local-only) failed: $e\n$st');
+    errorMessage = e.toString();
+    notifyListeners();
   }
+}
+
+/// Clear all messages for this conversation **locally only**.
+/// This performs a hard-delete on the local SQLite DB and clears in-memory state.
+/// It does NOT interact with Firestore.
+Future<void> clear() async {
+  try {
+    // 1) delete local DB rows for this conversation
+    await LocalChatDb.clearConversation(conversationId);
+
+    // 2) clear in-memory caches/maps related to this conversation
+    _messagesMap.removeWhere((key, value) => value.conversationId == conversationId);
+    _fingerprintIndex.removeWhere((k, v) => _messagesMap[v]?.conversationId != conversationId); // best-effort cleanup
+    _idToFingerprint.removeWhere((k, v) => _messagesMap[k]?.conversationId != conversationId);
+
+    // 3) clear selection and rebuild UI lists
+    selectedMessageIds.clear();
+    _rebuildMessagesFromMap();
+
+    // 4) notify
+    notifyListeners();
+  } catch (e, st) {
+    debugPrint('[ChatVM] clear (local-only) failed: $e\n$st');
+    errorMessage = e.toString();
+    notifyListeners();
+  }
+}
+
+/// softDeleteMessage
+/// NOW: LOCAL-ONLY DELETE (no server interaction)
+Future<void> softDeleteMessage(String messageId) async {
+  try {
+    final local = _messagesMap[messageId];
+    if (local == null) return;
+
+    final deleted = ChatMessage(
+      id: local.id,
+      conversationId: local.conversationId,
+      text: local.text,
+      senderId: local.senderId,
+      createdAt: local.createdAt,
+      replyToMessageId: local.replyToMessageId,
+      isDeleted: true, // 🔥 local tombstone
+      isLocal: local.isLocal,
+      delivered: local.delivered,
+      deliveredAt: local.deliveredAt,
+      expiresAt: local.expiresAt,
+      sendState: local.sendState,
+      sendAttempts: local.sendAttempts,
+    );
+
+    // 1️⃣ update in-memory
+    _messagesMap[messageId] = deleted;
+
+    // 2️⃣ persist to SQLite (source of truth)
+    await LocalChatDb.upsertMessage(deleted);
+
+    // 3️⃣ clean selection
+    selectedMessageIds.remove(messageId);
+
+    // 4️⃣ rebuild UI
+    _rebuildMessagesFromMap();
+    notifyListeners();
+  } catch (e, st) {
+    debugPrint('[ChatVM] softDeleteMessage (local-only) failed: $e\n$st');
+    errorMessage = e.toString();
+    notifyListeners();
+  }
+}
 
   // selection helpers
   void startSelection(String messageId) {

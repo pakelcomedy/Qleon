@@ -1,13 +1,19 @@
 // chat_room_view.dart
 // Simplified chat UI wired to the simplified ChatRoomViewModel.
-// Focus: minimal, working 1:1 chat using the VM created earlier.
-// NOTE: business logic (send, delete, selection, message store) lives in ChatRoomViewModel.
+// Changes made (see commit message / doc):
+// - Deletions are local-only in the view: tracked by _locallyDeletedIds set.
+//   This hides message bubbles immediately while persisting a local tombstone in VM.
+// - "Message deleted" placeholder removed — deleted messages are not shown.
+// - Clear chat performs local-only clear (hides all messages and clears local DB).
+// - Removed the startup CircularProgressIndicator: view shows messages immediately
+//   (no blocking loading UI). If you still want a subtle placeholder, adapt below.
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 
 import '../viewmodel/chat_room_viewmodel.dart';
 import '../../call/view/call_view.dart';
@@ -34,6 +40,9 @@ class _ChatRoomViewState extends State<ChatRoomView> {
   String? _replyToMessageId; // UI chooses which message to reply to; VM keeps messages/selection
   int _lastMessagesLength = 0;
   String? _lastError;
+
+  // Tracks messages that the user "deleted" locally in this view (local-only hide)
+  final Set<String> _locallyDeletedIds = {};
 
   bool get _selectionMode => vm.selectedMessageIds.isNotEmpty;
   bool get _canSend => _controller.text.trim().isNotEmpty && !vm.isSending && !_selectionMode;
@@ -66,20 +75,20 @@ class _ChatRoomViewState extends State<ChatRoomView> {
   }
 
   void _openContactOrGroupDetail() {
-  Navigator.push(
-    context,
-    MaterialPageRoute(
-      builder: (_) => widget.isGroup
-          ? const GroupDetailView()
-          : ContactDetailView(
-              // pass the required conversation id so the viewmodel can resolve contact
-              conversationIdOrId: widget.conversationId,
-              // optional: pass title if your ContactDetailView accepts it
-              title: widget.title,
-            ),
-    ),
-  );
-}
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => widget.isGroup
+            ? const GroupDetailView()
+            : ContactDetailView(
+                // pass the required conversation id so the viewmodel can resolve contact
+                conversationIdOrId: widget.conversationId,
+                // optional: pass title if your ContactDetailView accepts it
+                title: widget.title,
+              ),
+      ),
+    );
+  }
 
   @override
   void dispose() {
@@ -168,10 +177,23 @@ class _ChatRoomViewState extends State<ChatRoomView> {
     if (ok == true) {
       final ids = vm.selectedMessageIds.toList();
       try {
-        // Delegate deletions to VM
-        await Future.wait(ids.map((id) => vm.softDeleteMessage(id)));
+        // LOCAL-ONLY delete: hide immediately in UI and persist tombstone locally via VM.delete().
+        setState(() {
+          _locallyDeletedIds.addAll(ids);
+        });
+
+        // persist local deletion in VM/sqlite (best-effort). Do them sequentially to avoid races.
+        for (final id in ids) {
+          try {
+            await vm.delete(id);
+          } catch (e) {
+            // log and continue
+            debugPrint('[ChatRoomView] vm.delete failed for $id: $e');
+          }
+        }
+
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Deleted')));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Deleted locally')));
         _clearSelection();
       } catch (e) {
         if (!mounted) return;
@@ -183,16 +205,26 @@ class _ChatRoomViewState extends State<ChatRoomView> {
   Future<void> _showClearChatDialog() async {
     final ok = await _showConfirmSheet(
       title: 'Clear chat?',
-      message: 'All messages in this conversation will be soft-deleted (kept for audit).',
+      message: 'All messages in this conversation will be removed locally (kept on server).',
       destructive: true,
       primaryLabel: 'Clear',
     );
     if (ok == true) {
       try {
         final ids = vm.messages.map((m) => m.id).toList();
-        await Future.wait(ids.map((id) => vm.softDeleteMessage(id)));
+        setState(() {
+          _locallyDeletedIds.addAll(ids);
+        });
+
+        // persist full local clear via VM (best-effort)
+        try {
+          await vm.clear();
+        } catch (e) {
+          debugPrint('[ChatRoomView] vm.clear failed: $e');
+        }
+
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Chat cleared')));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Chat cleared locally')));
       } catch (e) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to clear chat: $e')));
@@ -271,40 +303,40 @@ class _ChatRoomViewState extends State<ChatRoomView> {
     }
   }
 
-PreferredSizeWidget _buildNormalAppBar() {
-  return AppBar(
-    backgroundColor: Colors.white,
-    elevation: 0,
-    leading: IconButton(
-      icon: const Icon(Icons.arrow_back, color: Color(0xFF374151)),
-      onPressed: () => Navigator.pop(context),
-    ),
-    title: Text(
-      widget.title,
-      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15, color: Color(0xFF111827)),
-    ),
-    actions: [
-      IconButton(
-        icon: const Icon(Icons.call_outlined, color: Color(0xFF374151)),
-        onPressed: _confirmCallAndNavigate,
+  PreferredSizeWidget _buildNormalAppBar() {
+    return AppBar(
+      backgroundColor: Colors.white,
+      elevation: 0,
+      leading: IconButton(
+        icon: const Icon(Icons.arrow_back, color: Color(0xFF374151)),
+        onPressed: () => Navigator.pop(context),
       ),
-      PopupMenuButton<int>(
-        icon: const Icon(Icons.more_vert, color: Color(0xFF374151)),
-        onSelected: (action) {
-          if (action == 0) {
-            _openContactOrGroupDetail();
-          } else if (action == 1) {
-            _showClearChatDialog();
-          }
-        },
-        itemBuilder: (_) => [
-          PopupMenuItem(value: 0, child: Text(widget.isGroup ? 'Group info' : 'Contact info')),
-          const PopupMenuItem(value: 1, child: Text('Clear chat', style: TextStyle(color: Colors.red))),
-        ],
+      title: Text(
+        widget.title,
+        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15, color: Color(0xFF111827)),
       ),
-    ],
-  );
-}
+      actions: [
+        IconButton(
+          icon: const Icon(Icons.call_outlined, color: Color(0xFF374151)),
+          onPressed: _confirmCallAndNavigate,
+        ),
+        PopupMenuButton<int>(
+          icon: const Icon(Icons.more_vert, color: Color(0xFF374151)),
+          onSelected: (action) {
+            if (action == 0) {
+              _openContactOrGroupDetail();
+            } else if (action == 1) {
+              _showClearChatDialog();
+            }
+          },
+          itemBuilder: (_) => [
+            PopupMenuItem(value: 0, child: Text(widget.isGroup ? 'Group info' : 'Contact info')),
+            const PopupMenuItem(value: 1, child: Text('Clear chat', style: TextStyle(color: Colors.red))),
+          ],
+        ),
+      ],
+    );
+  }
 
   PreferredSizeWidget _buildSelectionAppBar() {
     final single = vm.selectedMessageIds.length == 1;
@@ -326,7 +358,11 @@ PreferredSizeWidget _buildNormalAppBar() {
           icon: const Icon(Icons.copy, color: Color(0xFF4F46E5)),
           onPressed: () async {
             // compose copy text from VM-provided messages (UI only)
-            final texts = vm.selectedMessageIds.map((id) => vm.findMessageById(id)?.text ?? '').join('\n');
+            final texts = vm.selectedMessageIds
+                .where((id) => !(_locallyDeletedIds.contains(id)))
+                .map((id) => vm.findMessageById(id)?.text ?? '')
+                .where((t) => t.isNotEmpty)
+                .join('\n');
             await Clipboard.setData(ClipboardData(text: texts));
             if (!mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Copied')));
@@ -343,13 +379,19 @@ PreferredSizeWidget _buildNormalAppBar() {
     return ChangeNotifierProvider<ChatRoomViewModel>.value(
       value: vm,
       child: Consumer<ChatRoomViewModel>(builder: (context, model, _) {
-        // auto-scroll on new messages (UI behavior)
-        if (model.messages.length != _lastMessagesLength) {
+        // Cleanup locallyDeletedIds: remove ids that no longer exist in the VM local store
+        _locallyDeletedIds.removeWhere((id) => !model.messages.any((m) => m.id == id));
+
+        // Build visible messages list by filtering out locally deleted and server-deleted items
+        final visibleMessages = model.messages.where((m) => !m.isDeleted && !_locallyDeletedIds.contains(m.id)).toList();
+
+        // auto-scroll on new visible messages (UI behavior)
+        if (visibleMessages.length != _lastMessagesLength) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!mounted) return;
             _scrollToBottom(animated: true);
           });
-          _lastMessagesLength = model.messages.length;
+          _lastMessagesLength = visibleMessages.length;
         }
 
         final replyMessage = (_replyToMessageId != null) ? model.findMessageById(_replyToMessageId!) : null;
@@ -360,20 +402,19 @@ PreferredSizeWidget _buildNormalAppBar() {
           body: Column(
             children: [
               Expanded(
-                child: model.isLoading
-                    ? const Center(child: CircularProgressIndicator())
-                    : _MessagesListView(
-                        messages: model.messages,
-                        selectedIds: model.selectedMessageIds,
-                        onLongPressSelect: (id) => _startSelection(id),
-                        onTapSelect: (id) {
-                          if (_selectionMode) _toggleSelection(id);
-                        },
-                        onSwipeReply: (msg) {
-                          if (!_selectionMode) _setReply(msg.id);
-                        },
-                        scrollController: _scrollController,
-                      ),
+                // NOTE: removed blocking CircularProgressIndicator. We always render the messages list.
+                child: _MessagesListView(
+                  messages: visibleMessages,
+                  selectedIds: model.selectedMessageIds,
+                  onLongPressSelect: (id) => _startSelection(id),
+                  onTapSelect: (id) {
+                    if (_selectionMode) _toggleSelection(id);
+                  },
+                  onSwipeReply: (msg) {
+                    if (!_selectionMode) _setReply(msg.id);
+                  },
+                  scrollController: _scrollController,
+                ),
               ),
               if (replyMessage != null && !_selectionMode)
                 ReplyPreviewWidget(
@@ -626,7 +667,7 @@ class _MessageTileMVState extends State<_MessageTileMV> with SingleTickerProvide
       }
     }
 
-    final contentText = widget.message.isDeleted ? 'Message deleted' : widget.message.text;
+    final contentText = widget.message.text; // no more 'Message deleted' placeholder. Deleted messages are removed earlier.
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -677,7 +718,7 @@ class _MessageTileMVState extends State<_MessageTileMV> with SingleTickerProvide
                           style: TextStyle(color: isMe ? Colors.white70 : Colors.black87, fontSize: 12),
                         ),
                       ),
-                    Text(contentText, style: TextStyle(color: textColor, fontStyle: widget.message.isDeleted ? FontStyle.italic : FontStyle.normal)),
+                    Text(contentText, style: TextStyle(color: textColor, fontStyle: FontStyle.normal)),
                     const SizedBox(height: 6),
                     Row(
                       mainAxisSize: MainAxisSize.min,
